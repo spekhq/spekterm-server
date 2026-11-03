@@ -8,7 +8,7 @@
  */
 import type { Database } from './db.ts'
 import { type Offer, offerable, pendingIdsFor } from './handoffs.ts'
-import type { Clock } from './team.ts'
+import { type Clock, isDeviceActive } from './team.ts'
 
 /** What delivery needs of a connection; `Connection` implements it, tests use fakes. */
 export interface DeliveryTarget {
@@ -17,6 +17,8 @@ export interface DeliveryTarget {
   /** Handoff ids already offered on this connection. */
   readonly offered: Set<string>
   sendEvent(kind: string, data: unknown): void
+  /** Close the connection because its device was found revoked (4004). */
+  closeRevoked(): void
 }
 
 export type CloseReason = 'replaced' | 'other'
@@ -109,6 +111,13 @@ export class Delivery {
   #offer(handoffId: string, target: DeliveryTarget): void {
     if (this.closing || this.#leases.has(handoffId) || target.offered.has(handoffId)) return
     try {
+      if (target.deviceId === null || !isDeviceActive(this.#db, target.deviceId)) {
+        // Revoked by another process before the sweep noticed: never push text there. Closing it runs
+        // onClosed, which offers what it held, and this handoff, to the member's next ready connection.
+        this.#log(`device ${target.deviceId} was revoked; closing its connection instead of offering`)
+        target.closeRevoked()
+        return
+      }
       const offer = offerable(this.#db, handoffId, this.#now)
       if (offer === undefined || offer.recipientMemberId !== target.memberId) return
       this.#leases.set(handoffId, target)

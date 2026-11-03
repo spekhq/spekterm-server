@@ -7,7 +7,7 @@ import type { Database } from './db.ts'
 import { type ErrorCode, ProtocolError } from './errors.ts'
 import { CLOSE_CODES, OPERATIONS, type OperationContext, parseFrame } from './protocol.ts'
 import type { CloseReason, DeliveryTarget } from './delivery.ts'
-import { type Clock, type Identity, touchDevice } from './team.ts'
+import { type Clock, type Identity, isDeviceActive, touchDevice } from './team.ts'
 
 export interface Timings {
   /** How long a connection may stay unauthenticated. */
@@ -80,6 +80,21 @@ export class Connection implements DeliveryTarget {
 
   sendEvent(kind: string, data: unknown): void {
     this.#send({ t: 'evt', k: kind, d: data })
+  }
+
+  /** Closes the connection because its device was found revoked. */
+  closeRevoked(): void {
+    this.close(CLOSE_CODES.REVOKED, 'device revoked')
+  }
+
+  #stillActive(): boolean {
+    if (this.#deviceId === null) return false
+    try {
+      return isDeviceActive(this.#host.db, this.#deviceId)
+    } catch (error) {
+      this.#host.log(`could not check device ${this.#deviceId}: ${(error as Error).message}`)
+      return true
+    }
   }
 
   close(code: number, reason = ''): void {
@@ -177,6 +192,12 @@ export class Connection implements DeliveryTarget {
     }
     if (operation.auth === 'none' && this.#state === 'authenticated') {
       this.#answerError(id, 'ALREADY_AUTHENTICATED', 'this connection is already authenticated')
+      return
+    }
+    // A device revoked by another process is caught here, before the sweep notices (protocol-clarifications D1).
+    if (operation.auth === 'device' && !this.#stillActive()) {
+      this.#answerError(id, 'AUTH_FAILED', 'this device is not on the team')
+      this.close(CLOSE_CODES.REVOKED, 'device revoked')
       return
     }
     let closeCode: number | null = null

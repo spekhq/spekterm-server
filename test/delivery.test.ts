@@ -63,11 +63,12 @@ test('handoff.send errors reach the client with their detail', async (t) => {
   assert.equal(sender.ws.readyState, sender.ws.OPEN)
 })
 
-test('team.members lists active members by handle with id, handle and display name only', async (t) => {
+test('team.members lists active members by handle with id, handle, display name and device count only', async (t) => {
   const { sender } = await team(t)
   const answer = await sender.request('team.members')
   assert.deepEqual(answer.r.members.map((m: { handle: string }) => m.handle), ['alex', 'sam'])
-  assert.deepEqual(Object.keys(answer.r.members[0]).sort(), ['displayName', 'handle', 'id'])
+  assert.deepEqual(Object.keys(answer.r.members[0]).sort(), ['deviceCount', 'displayName', 'handle', 'id'])
+  assert.deepEqual(answer.r.members.map((m: { deviceCount: number }) => m.deviceCount), [1, 1])
 })
 
 // --- offering -------------------------------------------------------------------------------------------
@@ -226,9 +227,18 @@ test('during shutdown a released lease is not offered to another connection', as
 
 // --- Delivery with fake connections ---------------------------------------------------------------------
 
-function fake(memberId: string, deviceId: string): DeliveryTarget & { sent: Array<{ kind: string; data: any }> } {
+function fake(memberId: string, deviceId: string): DeliveryTarget & { sent: Array<{ kind: string; data: any }>; revoked: boolean } {
   const sent: Array<{ kind: string; data: any }> = []
-  return { memberId, deviceId, offered: new Set(), sent, sendEvent: (kind, data) => sent.push({ kind, data }) }
+  const target = {
+    memberId,
+    deviceId,
+    offered: new Set<string>(),
+    sent,
+    revoked: false,
+    sendEvent: (kind: string, data: unknown) => void sent.push({ kind, data }),
+    closeRevoked: () => void (target.revoked = true),
+  }
+  return target
 }
 
 test('a replacing connection that closes before becoming ready: the other ready device is offered it', (t) => {
@@ -267,4 +277,87 @@ test('an offer whose database read fails is logged and does not throw', (t) => {
   assert.equal(desktop.sent.length, 0)
   assert.ok(logs.some((l) => l.startsWith('could not')))
   void alex
+})
+
+// --- revoked devices (protocol-clarifications) ----------------------------------------------------------
+
+test('requests from a device revoked before the sweep are AUTH_FAILED then 4004, and change nothing', async (t) => {
+  const { url, db, dbPath, sam, sender, alex } = await team(t, { sweepIntervalMs: 60_000 })
+  const { openDatabaseFile } = await import('../src/db.ts')
+  const { revokeDevice } = await import('../src/team.ts')
+  const { handoffStatus } = await import('../src/handoffs.ts')
+  const revokeElsewhere = (id: string) => {
+    const other = openDatabaseFile(dbPath)
+    revokeDevice(other, id, Date.now)
+    other.close()
+  }
+
+  // handoff.send: nothing stored.
+  revokeElsewhere(alex.device.id)
+  const send1 = await send(sender, 'sam', 'never stored', 'revoked-send')
+  assert.equal(send1.e?.code, 'AUTH_FAILED')
+  assert.equal((await sender.closed).code, 4004)
+  const stored = db.prepare("SELECT count(*) AS n FROM handoffs WHERE client_id = 'revoked-send'").get() as { n: number }
+  assert.equal(stored.n, 0)
+
+  // handoff.received: the handoff stays pending and the member's other connection is offered it at once.
+  const kim = seedMember(db, 'kim')
+  const kimClient = await connect(url, kim)
+  const laptopCred = addDevice(db, 'sam', 'sam laptop')
+  const desktop = await connect(url, sam)
+  const laptop = await connect(url, laptopCred)
+  const sent = await send(kimClient)
+  await laptop.nextEvent('handoff.incoming')
+  revokeElsewhere(laptopCred.device.id)
+  const ack = await laptop.request('handoff.received', { id: sent.r.handoff.id })
+  assert.equal(ack.e?.code, 'AUTH_FAILED')
+  assert.equal((await laptop.closed).code, 4004)
+  assert.equal(handoffStatus(db, sent.r.handoff.id), 'pending')
+  assert.equal((await desktop.nextEvent('handoff.incoming')).d.id, sent.r.handoff.id)
+
+  // device.rename.
+  revokeElsewhere(sam.device.id)
+  const rename = await desktop.request('device.rename', { name: 'x' })
+  assert.equal(rename.e?.code, 'AUTH_FAILED')
+  assert.equal((await desktop.closed).code, 4004)
+  kimClient.close()
+})
+
+test('a device revoked before the sweep is not offered a new handoff; the other device is', async (t) => {
+  const { url, db, dbPath, sam, sender } = await team(t, { sweepIntervalMs: 60_000 })
+  const { openDatabaseFile } = await import('../src/db.ts')
+  const { revokeDevice } = await import('../src/team.ts')
+  const laptopCred = addDevice(db, 'sam', 'sam laptop')
+  const desktop = await connect(url, sam)
+  const laptop = await connect(url, laptopCred)
+  const other = openDatabaseFile(dbPath)
+  revokeDevice(other, laptopCred.device.id, Date.now)
+  other.close()
+  const sent = await send(sender)
+  assert.equal((await laptop.closed).code, 4004)
+  assert.equal(laptop.events('handoff.incoming').length, 0)
+  assert.equal((await desktop.nextEvent('handoff.incoming')).d.id, sent.r.handoff.id)
+  desktop.close()
+})
+
+test('team.members reflects a revocation made after hello', async (t) => {
+  const { url, db, sam } = await team(t)
+  const laptopCred = addDevice(db, 'sam', 'sam laptop')
+  const desktop = await connect(url, sam)
+  const before = (await desktop.request('team.members')).r.members.find((m: { handle: string }) => m.handle === 'sam')
+  assert.equal(before.deviceCount, 2)
+  const { revokeDevice } = await import('../src/team.ts')
+  revokeDevice(db, laptopCred.device.id, Date.now)
+  const after = (await desktop.request('team.members')).r.members.find((m: { handle: string }) => m.handle === 'sam')
+  assert.equal(after.deviceCount, 1)
+  desktop.close()
+})
+
+test('ids have the documented format', async (t) => {
+  const { db, sender } = await team(t)
+  const ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/
+  const invite = createInvite(db, {}, Date.now)
+  const joined = joinTeam(db, { code: invite.code, handle: 'kim', displayName: 'Kim', deviceName: 'k' }, Date.now)
+  const sent = await send(sender)
+  for (const id of [invite.id, joined.member.id, joined.device.id, sent.r.handoff.id]) assert.match(id, ID)
 })

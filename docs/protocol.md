@@ -69,7 +69,7 @@ Stable strings; branch on them, show `message` only as a detail.
 | `UNSUPPORTED_VERSION` | None of the offered protocol versions is spoken. `detail.supported` lists the server's. |
 | `NOT_AUTHENTICATED` | An operation that needs an authenticated connection, sent before `join` or `hello` succeeded. |
 | `ALREADY_AUTHENTICATED` | `invite.inspect`, `join` or `hello` on a connection that is already authenticated. The connection stays open. |
-| `AUTH_FAILED` | The device is not on the team: unknown, revoked, removed with its member, or a wrong secret. |
+| `AUTH_FAILED` | The device is not on the team: unknown, revoked, removed with its member, or a wrong secret. Before authentication it is followed by 4003; on an authenticated connection (the device was revoked moments ago) by 4004 right after the answer, and the request did nothing. Either way, discard the credential. |
 | `INVITE_UNKNOWN` | No such invite: never issued, cancelled, or for a member who was removed since. |
 | `INVITE_EXPIRED` | The invite has expired. |
 | `INVITE_USED` | The invite was already used. |
@@ -128,12 +128,20 @@ Shapes use `string`, `number` (integers; times are milliseconds since the Unix e
 Names (`displayName`, `deviceName`, `name`) are trimmed, then must be 1–64 Unicode code points with no control
 characters (category Cc) and no U+2028 / U+2029; otherwise `BAD_PARAMS` with `detail.field`.
 
+**Ids** (member, device, invite, handoff) are 1–64 characters of `A`–`Z`, `a`–`z`, `0`–`9`, `_` and `-`, never
+starting with `-`, and case-sensitive. Treat them as opaque.
+
+**Every operation below** can also be answered `AUTH_FAILED` when the device was revoked after the connection
+authenticated (by the admin, or with its member). Nothing was done; the connection is closed with 4004 right
+after the answer.
+
 Objects used in results:
 
 - **Server**: `{ "name": "spekterm-server", "version": string }` — the server software and its version.
 - **Team**: `{ "name": string }`.
 - **Member**: `{ "id": string, "handle": string, "displayName": string, "deviceCount": number }` — `deviceCount`
-  is the number of this member's devices that are not revoked, this one included.
+  is the number of this member's devices that are not revoked, this one included, **at the moment of
+  authentication**. It can be stale later; use `team.members` for a current count.
 - **Device**: `{ "id": string, "name": string }`.
 
 ### `invite.inspect`
@@ -163,8 +171,9 @@ change later.
 → `r`: `{ "protocol": 1, "server": Server, "operations": [string], "team": Team, "member": Member, "device": Device, "deviceId": string, "deviceSecret": string }`
 
 **The credential (`deviceId`, `deviceSecret`) is given once**; the server keeps only a hash of the secret.
-Store it in the platform's protected storage, never in a file an agent can read. The connection is now
-authenticated as the new device.
+Never hand it to a terminal or an agent. (spekterm keeps it in its secrets file, readable only by the user
+account — and so by any program running as that user, agents' shell commands included; PRD §7.4.) The
+connection is now authenticated as the new device.
 
 Errors: `INVITE_UNKNOWN`, `INVITE_EXPIRED`, `INVITE_USED`, `HANDLE_TAKEN`, `BAD_PARAMS`, `UNSUPPORTED_VERSION`.
 A refused join does not use up the invite.
@@ -195,8 +204,9 @@ Renames this device.
 
 This device leaves. Its credential stops working and, after the answer, the connection is closed with 4004.
 When it was the member's last device, **the member leaves the team too**: they are removed, their handle is
-freed, and their unused device invites are cancelled. Use `member.deviceCount` from `join` / `hello` to tell the
-user beforehand which of the two will happen.
+freed, and their unused device invites are cancelled. To tell the user beforehand which of the two will happen,
+ask `team.members` right before and read this member's `deviceCount` (the one from `join` / `hello` may be
+stale). The answer's `memberRemoved` says what actually happened.
 
 `p`: `{}` → `r`: `{ "memberRemoved": boolean }`
 
@@ -205,7 +215,8 @@ user beforehand which of the two will happen.
 The team's members, to choose a recipient from (and for the agent to know whom it can hand work to). Includes
 this device's own member. Ask again when you need a fresh list; it is not pushed.
 
-`p`: `{}` → `r`: `{ "members": [{ "id": string, "handle": string, "displayName": string }] }`, ordered by handle.
+`p`: `{}` → `r`: `{ "members": [{ "id": string, "handle": string, "displayName": string, "deviceCount": number }] }`,
+ordered by handle. `deviceCount` is the member's devices that are not revoked, now.
 
 ### `handoff.send`
 
@@ -229,7 +240,8 @@ Sends a handoff to a teammate. **Call it only after the user confirmed the full 
 (the admin issues a device invite). `expiresAt` is 30 days after `sentAt`.
 
 Errors: `BAD_PARAMS` (`detail.field`, and `detail.limit` for a length), `RECIPIENT_UNKNOWN`,
-`RECIPIENT_IS_SELF`, `HANDOFF_ID_REUSED`, `RATE_LIMITED` (`detail.retryAt`). A member may send at most a set
+`RECIPIENT_IS_SELF`, `HANDOFF_ID_REUSED`, `RATE_LIMITED` (`detail.retryAt`), `AUTH_FAILED` (then 4004; nothing
+was stored). A member may send at most a set
 number of handoffs in any hour (30 unless the operator changed it), across all of their devices.
 
 ### `handoff.received`
@@ -239,7 +251,8 @@ Acknowledges a handoff this device received in a `handoff.incoming` event, **aft
 `p`: `{ "id": string }` → `r`: `{}`
 
 Answered `{}` for the first acknowledgement and for any repeat from the same device. Errors:
-`HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_EXPIRED`, `HANDOFF_UNKNOWN`, `BAD_PARAMS`.
+`HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_EXPIRED`, `HANDOFF_UNKNOWN`, `BAD_PARAMS`, `AUTH_FAILED` (then 4004;
+the handoff stays pending and goes to another of the member's devices).
 
 ## 6. One connection per device
 
@@ -249,7 +262,8 @@ otherwise keep replacing each other.
 
 ## 7. Losing access
 
-- **Revoked while connected**: the connection is closed with 4004 within 10 seconds of the revocation.
+- **Revoked while connected**: the connection is closed with 4004 within 10 seconds of the revocation, or at
+  the device's next request, which is answered `AUTH_FAILED` first. No handoff is offered to it meanwhile.
 - **Revoked while offline**: the next `hello` is answered `AUTH_FAILED`, then 4003.
 
 Either way, discard the credential. The admin can issue a device invite for the member if they are still on the
@@ -290,7 +304,7 @@ and acceptance gate like any other.
 ## 11. Receiving handoffs
 
 **Which device.** A pending handoff is offered to one of the recipient's connections at a time: the connection
-that authenticated most recently. It stays with that connection until it is acknowledged or the connection
+that authenticated most recently, and never one whose device has been revoked. It stays with that connection until it is acknowledged or the connection
 closes; then it is offered to the member's most recent remaining connection. If the connection was replaced by
 a newer one of the same device (4006), it is offered on the newer one, after its `hello` answer. A connection
 is never offered the same handoff twice. A handoff waits on the server for at most 30 days.
@@ -309,8 +323,10 @@ is never offered the same handoff twice. A handoff waits on the server for at mo
 5. On `HANDOFF_UNKNOWN` for a handoff you stored (the server lost it, for example restored from an older
    backup), or when the server's `operations` no longer list `handoff.received`, show it: your copy is the only
    one left.
-6. When you discard the credential (close 4004, or `AUTH_FAILED` before authentication), remove the handoffs
-   you stored but never had acknowledged.
+6. When you discard the credential (close 4004, or `AUTH_FAILED`), **show** the handoffs you stored but whose
+   acknowledgement was never answered, marked as possibly also delivered to another device. Do not delete
+   them: the acknowledgement may have reached the server, which then counts the handoff as delivered here and
+   offers it nowhere else.
 7. If you cannot store an incoming handoff right now (for example the inbox is full), keep the event in memory
    and store and acknowledge it when you can. It stays assigned to this connection until then; on reconnecting
    it is offered again.

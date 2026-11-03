@@ -205,13 +205,15 @@ setting that sends automatically in v1.
 
 - Each device has its own credential, issued when it joins, stored **only as a hash** on the server and
   revocable on its own.
-- On the desktop the credential lives in spekterm's secret store. It never reaches a terminal or an agent.
+- On the desktop the credential lives in spekterm's secrets file (mode 0600, as its Slack token). spekterm never
+  hands it to a terminal or an agent, but any program running as the same user can read that file, agents'
+  shell commands included (§13.1).
 - Invites are single use and expire (default 7 days).
 
 ### 7.5 Transport
 
 - **TLS only.** The server is expected behind a normal TLS terminator (for example a reverse proxy with an
-  ACME certificate). spekterm refuses an address that is not `https`/`wss`.
+  ACME certificate). spekterm refuses an address that is not `wss`.
 - An invite may carry the certificate's fingerprint. If it does, spekterm pins it, which lets a team run with
   a self-signed certificate on a private network.
 
@@ -285,9 +287,9 @@ here so the boundary is clear.
 
 - **Settings → Team**: join with an invite link, the server address, this device's name, presence visibility,
   leave the team.
-- **Handoff to a person**: the outbox accepts a teammate as a target. The agent's introduction lists
-  teammates, within the introduction's fixed size budget (the CLI keeps only a preview past 10,000
-  characters).
+- **Handoff to a person**: the outbox accepts a teammate as a target. The agent's introduction points to a
+  teammates file (the rules and the list live in the file), so the introduction's fixed size budget (the CLI
+  keeps only a preview past 10,000 characters) grows by a line, not by the team.
 - **Send confirmation** (§7.3) and agent receipts for the new outcomes (waiting for confirmation, sent,
   discarded, refused).
 - **Inbox**: a new source, "teammate", going through the existing acceptance gate, folder choice and filled
@@ -322,7 +324,7 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 | **Requests are still ignored.** A tool cannot make someone care. | Lower the cost of starting (a ready session) and make the state visible to the sender; the social part stays social. |
 | **Nobody runs the server.** Self-hosting is a hurdle for small teams. | One container, a guide that fits on a page, sensible defaults, no external dependencies. |
 | **Presence feels like surveillance.** | Each member can hide; presence means only "a device is connected". |
-| **The agent introduction outgrows its budget.** | Teammates are listed compactly and cut before any rule is cut, as repositories are today. |
+| **The agent introduction outgrows its budget.** | Teammates are not listed in the introduction; it points to a teammates file, so its size does not grow with the team. |
 | **Version skew** between desktops and the server. | Versioned protocol, explicit "incompatible" state in spekterm. |
 | **The handoff body reveals more than the sender meant.** | The sender confirms the full text before it is sent (§7.3). |
 
@@ -355,3 +357,6 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
   device invites cancelled, so "leave the team" in Settings (§10) means what it says and no member without
   devices keeps receiving handoffs. The admin revoking a device does not remove the member, so a lost
   machine can be replaced with a device invite (server-foundation, design D10).
+- **The device secret stays in spekterm's secrets file** (0600), not the OS keyring (2026-11-03). Accepted
+  consequence: an agent's shell command can read it and, with it, connect as the user and send handoffs
+  without the desktop's confirmation (§7.3); the hourly rate (§7.6) and revoking the device are the limits.

@@ -197,13 +197,25 @@ export function listMembers(db: Database): MemberListing[] {
   }))
 }
 
-/** The team's members who have not been removed, by handle (`team-directory` spec). */
-export function listTeamMembers(db: Database): MemberInfo[] {
+/** The team's members who have not been removed, by handle, with their device counts (`team-directory`). */
+export function listTeamMembers(db: Database): Array<MemberInfo & { deviceCount: number }> {
   return (
     db
       .prepare('SELECT id, handle, display_name FROM members WHERE removed_at IS NULL ORDER BY handle')
       .all() as unknown as MemberRow[]
-  ).map((m) => ({ id: m.id, handle: m.handle, displayName: m.display_name }))
+  ).map((m) => ({ id: m.id, handle: m.handle, displayName: m.display_name, deviceCount: deviceCount(db, m.id) }))
+}
+
+/** Whether a device is still on the team: not revoked, and its member not removed. One indexed query. */
+export function isDeviceActive(db: Database, deviceId: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 AS ok FROM devices d JOIN members m ON m.id = d.member_id
+         WHERE d.id = ? AND d.revoked_at IS NULL AND m.removed_at IS NULL`,
+      )
+      .get(deviceId) !== undefined
+  )
 }
 
 /** Of the given device ids, those that are now revoked (or unknown). Used by the revocation sweep. */
