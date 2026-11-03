@@ -1,0 +1,18 @@
+schema: spec-driven
+
+context: |
+  Project: spekterm-server — a small self-hosted server a team runs so spekterm users can hand work to
+           each other (MIT open source). A mailbox, a team directory and a presence signal. It runs no
+           agents and has no access to anyone's repositories.
+  Authority: docs/PRD.md is the single source of product requirements;
+             docs/protocol.md (from M0) is the wire contract, held to the server by a test.
+  Client: spekterm (sibling repo ../spekterm, Electron desktop app). Changes on the spekterm side are made
+          in that repo's own OpenSpec changes, not here.
+  Tech stack: Node >= 22.22 (matches spekterm's toolchain), TypeScript run by Node's built-in type
+              stripping (no build step for the server), node:sqlite for storage, `ws` for the WebSocket
+              server, node:test for tests. One container, one data directory, one port.
+  Conventions: English is the single source of truth for everything committed — code, comments,
+               openspec/ artifacts, docs (same as spekterm). Keep runtime dependencies minimal: each new
+               one needs a reason in design.md.
+  Verification: npm test (node:test, unit and in-process integration over a real WebSocket),
+                npm run typecheck.
