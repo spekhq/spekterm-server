@@ -284,10 +284,12 @@ above rely on:
 
 - after every `join` or `hello`, call `handoff.sync` from the last stored `seq` until `more: false`;
 - store a record durably before storing its `seq` as the last seen; a record replaces any earlier one with the
-  same `id`; ignore a record whose `seq` is not greater than the stored one for that `id`;
+  same `id`; ignore a record whose `seq` is not greater than the stored one for that `id` (except during a reset);
 - on `reset: true`, treat the records from that answer up to the next answer with `more: false` as the server's
   whole list (records it no longer has may be kept, marked as unknown to the server); remember durably that such a
-  reset is in progress, and if the paging is interrupted, sync again from 0 to finish it;
+  reset is in progress, and if the paging is interrupted, sync again from 0 to finish it; while it is in progress,
+  a record replaces the stored one with the same `id` whatever its `seq`, and the last seen `seq` is set to each
+  page's last `seq` rather than kept as the highest;
 - a record for a handoff this device did not send (another device of the member, or a reinstall) has no title:
   show it without one;
 - notify the user of `done`, `declined` and `expired` only on the device named by `sentFrom`; the member's other
@@ -304,8 +306,9 @@ And the rules a receiving client follows to report:
   report the client accepted is not refused;
 - send the reports of one handoff one at a time, in order, each after the previous was answered; after a lost
   answer, send the same report again before any later one;
-- report `taken` when a session is opened for it, `declined` only when the user chooses to decline, and `done`
-  with the session agent's report;
+- report `taken` once a session for it has actually started (it cannot be taken back), `declined` only when the
+  user chooses to decline, and `done` with the session agent's report; `taken` is optional, and a client that
+  never reported it may go straight to `done` or `declined`;
 - on `HANDOFF_FINISHED`, `HANDOFF_EXPIRED`, `HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_UNKNOWN` or
   `TOO_MANY_REPORTS`, stop sending reports for that handoff.
 

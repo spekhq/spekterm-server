@@ -122,6 +122,10 @@ test('a resend after the handoff was taken answers its current status', (t) => {
   assert.equal(again.duplicate, true)
   assert.equal(again.handoff.id, first.handoff.id)
   assert.equal(again.handoff.status, 'taken')
+  // The answer carries the handoff's current seq: the new one's, then the latest change's.
+  const record = syncSent(db, alex.memberId, 0).result.records.find((r) => r.id === first.handoff.id)!
+  assert.ok(first.handoff.seq < again.handoff.seq)
+  assert.equal(again.handoff.seq, record.seq)
 })
 
 // --- validation (task 2.1) ------------------------------------------------------------------------------

@@ -42,7 +42,7 @@ export interface SendRequest {
 }
 
 export interface SendResult {
-  handoff: { id: string; status: HandoffStatus; sentAt: number; expiresAt: number }
+  handoff: { id: string; status: HandoffStatus; sentAt: number; expiresAt: number; seq: number }
   recipient: { id: string; handle: string; displayName: string; deviceCount: number }
   duplicate: boolean
 }
@@ -130,18 +130,26 @@ export function sendHandoff(
   return writeTransaction(db, () => {
     const earlier = db
       .prepare(
-        `SELECT id, status, created_at, expires_at, recipient_member_id, request_hash FROM handoffs
+        `SELECT id, status, created_at, expires_at, recipient_member_id, request_hash, seq FROM handoffs
          WHERE sender_member_id = ? AND client_id = ?`,
       )
       .get(sender.memberId, request.clientId) as
-      | { id: string; status: HandoffStatus; created_at: number; expires_at: number; recipient_member_id: string; request_hash: Uint8Array }
+      | {
+          id: string
+          status: HandoffStatus
+          created_at: number
+          expires_at: number
+          recipient_member_id: string
+          request_hash: Uint8Array
+          seq: number
+        }
       | undefined
     if (earlier !== undefined) {
       if (!Buffer.from(earlier.request_hash).equals(hash)) {
         throw new ProtocolError('HANDOFF_ID_REUSED', 'this clientId was used for a different handoff')
       }
       return {
-        handoff: { id: earlier.id, status: earlier.status, sentAt: earlier.created_at, expiresAt: earlier.expires_at },
+        handoff: { id: earlier.id, status: earlier.status, sentAt: earlier.created_at, expiresAt: earlier.expires_at, seq: earlier.seq },
         recipient: recipientById(db, earlier.recipient_member_id),
         duplicate: true,
       }
@@ -167,6 +175,7 @@ export function sendHandoff(
 
     const id = newHandoffId()
     const expiresAt = at + HANDOFF_LIFETIME_MS
+    const seq = nextSeq(db)
     db.prepare(
       `INSERT INTO handoffs (id, client_id, sender_member_id, sender_device_id, recipient_member_id, enc, title, body,
          request_hash, status, created_at, expires_at, seq, changed_at)
@@ -183,11 +192,11 @@ export function sendHandoff(
       hash,
       at,
       expiresAt,
-      nextSeq(db),
+      seq,
       at,
     )
     return {
-      handoff: { id, status: 'pending', sentAt: at, expiresAt },
+      handoff: { id, status: 'pending', sentAt: at, expiresAt, seq },
       recipient: recipientById(db, recipient.id),
       duplicate: false,
     }

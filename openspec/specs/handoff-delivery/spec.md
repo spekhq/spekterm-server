@@ -11,8 +11,8 @@ text no longer than needed.
 
 An authenticated device SHALL be able to send a handoff with `handoff.send` carrying `clientId`, `to` (the
 recipient's handle) and `payload` (`enc`, `title`, `body`). On success the server SHALL store it as `pending`
-and answer with `handoff` (`id`, `status`, `sentAt`, `expiresAt`), `recipient` (`id`, `handle`,
-`displayName`, `deviceCount`) and `duplicate: false`. `id` is assigned by the server; `expiresAt` is 30 days
+and answer with `handoff` (`id`, `status`, `sentAt`, `expiresAt`, `seq` — its current sequence number,
+`handoff-status`), `recipient` (`id`, `handle`, `displayName`, `deviceCount`) and `duplicate: false`. `id` is assigned by the server; `expiresAt` is 30 days
 after `sentAt`; `deviceCount` is the number of the recipient's devices that are not revoked.
 
 #### Scenario: Send to a teammate

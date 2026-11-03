@@ -239,9 +239,12 @@ Sends a handoff to a teammate. **Call it only after the user confirmed the full 
   Normalise the text before showing it for confirmation, so that what the user confirms is what is sent. Text
   must be well-formed UTF-16 (no lone surrogates). The server does not alter it.
 
-→ `r`: `{ "handoff": { "id": string, "status": Status, "sentAt": number, "expiresAt": number }, "recipient": { "id": string, "handle": string, "displayName": string, "deviceCount": number }, "duplicate": boolean }`
+→ `r`: `{ "handoff": { "id": string, "status": Status, "sentAt": number, "expiresAt": number, "seq": number }, "recipient": { "id": string, "handle": string, "displayName": string, "deviceCount": number }, "duplicate": boolean }`
 
 `status` is one of the statuses of section 12; a new handoff is `pending`, a resend answers the current status.
+`seq` is the handoff's current sequence number (section 10, `handoff.status`), the same as its record's: store the
+sent handoff under it, and a record or event for it with the same or a lower `seq` adds nothing new. Do not
+take it as the last one seen for `handoff.sync`: other handoffs may have changed in between.
 
 `recipient.deviceCount` is how many devices the recipient has; with `0` the handoff waits until they add one
 (the admin issues a device invite). `expiresAt` is 30 days after `sentAt`.
@@ -441,10 +444,14 @@ who dismisses a handoff without declining sends nothing: the sender sees `delive
    `more: false`.
 2. Store a record durably before storing its `seq` as the last one seen. A record replaces any earlier one with
    the same `id`; ignore a record whose `seq` is not greater than the one stored for that `id` (a record can
-   arrive twice, in a page and as an event).
+   arrive twice, in a page and as an event). The last one seen is the highest `seq` stored — except during a
+   reset (rule 3).
 3. On `reset: true`, the records from that answer up to the next answer with `more: false` are the server's whole
    list: keep records it no longer has if you like, marked as unknown to the server. Remember durably that the
-   reset is in progress; if paging is interrupted, sync again from 0 to finish it.
+   reset is in progress; if paging is interrupted, sync again from 0 to finish it. While the reset is in
+   progress, the server's numbering has gone back (it was restored from an older backup), so stored `seq`s mean
+   nothing: a record replaces the stored one with the same `id` **whatever its `seq`**, and the last one seen is
+   **set** to each page's last `seq`, not kept as the highest ever seen.
 4. A record for a handoff this device did not send (another device of the member, or after reinstalling) has no
    title: show it without one.
 5. Notify the user of `done`, `declined` and `expired` only on the device named by `sentFrom`; the member's other
@@ -461,7 +468,9 @@ who dismisses a handoff without declining sends nothing: the sender sees `delive
    then check the length — so that a report the client accepted is not refused.
 3. Send the reports of one handoff one at a time, in order, each after the previous one was answered. After a
    lost answer, send the same report again before any later one.
-4. Report `taken` when a session is opened for the handoff, `declined` only when the user chooses to decline,
-   and `done` with the session agent's report.
+4. Report `taken` once a session for the handoff has actually started (it cannot be taken back, so not at the
+   moment the user presses Accept), `declined` only when the user chooses to decline, and `done` with the session
+   agent's report. `taken` is optional: a client that never got to report it (it crashed in between) may go
+   straight to `done` or `declined`, which are allowed from `delivered`.
 5. On `HANDOFF_FINISHED`, `HANDOFF_EXPIRED`, `HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_UNKNOWN` or
    `TOO_MANY_REPORTS`, stop reporting for that handoff.

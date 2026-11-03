@@ -113,6 +113,8 @@ test("the sender's own send: the answer first, then the pending event", async (t
   const id = await send(sender)
   const event = await sender.nextEvent('handoff.status')
   assert.deepEqual([event.d.id, event.d.status], [id, 'pending'])
+  const answer = sender.answers.find((a) => a.ok && a.r?.handoff?.id === id)!
+  assert.equal(answer.r.handoff.seq, event.d.seq)
   const answerAt = sender.frames.findIndex((f) => f.t === 'res' && f.ok && (f as { r?: { handoff?: { id: string } } }).r?.handoff?.id === id)
   const eventAt = sender.frames.indexOf(event)
   assert.ok(answerAt !== -1 && answerAt < eventAt, `answer at ${answerAt}, event at ${eventAt}`)
