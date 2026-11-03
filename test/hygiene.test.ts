@@ -59,6 +59,22 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
   assert.equal(sent.ok, true)
   const incoming = await helloing.nextEvent('handoff.incoming')
   assert.deepEqual((await helloing.request('handoff.received', { id: incoming.d.id })).r, {})
+  // Kim follows the statuses; Sam takes the first and finishes it, and declines a second with a reason.
+  assert.equal((await kim.request('handoff.sync', { after: 0 })).ok, true)
+  const reason = 'secret-reason-4b8d21'
+  const report = 'secret-report-' + 'r'.repeat(3000) + '-9c0e'
+  assert.deepEqual((await helloing.request('handoff.update', { id: incoming.d.id, status: 'taken' })).r, { status: 'taken' })
+  const done = await helloing.request('handoff.update', { id: incoming.d.id, status: 'done', payload: { enc: 'none', text: report } })
+  assert.deepEqual(done.r, { status: 'done' })
+  const declinedSend = await kim.request('handoff.send', { clientId: 'h2', to: 'sam', payload: { enc: 'none', title: 't2', body: 'b2' } })
+  const offered = await helloing.nextEvent('handoff.incoming')
+  assert.deepEqual((await helloing.request('handoff.received', { id: offered.d.id })).r, {})
+  const declined = await helloing.request('handoff.update', { id: offered.d.id, status: 'declined', payload: { enc: 'none', text: reason } })
+  assert.deepEqual(declined.r, { status: 'declined' })
+  for (;;) {
+    const e = await kim.nextEvent('handoff.status')
+    if (e.d.id === declinedSend.r.handoff.id && e.d.status === 'declined') break
+  }
   kim.close()
 
   const second = await admin('invite', 'create', '--member', 'sam')
@@ -92,13 +108,14 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
     serverOutput: server.output(),
     cliOutput: cliOutput.join('\n'),
     secrets: [code, code.toLowerCase(), secondCode, deviceSecret, laptopJoin.r.deviceSecret, kimJoined.r.deviceSecret,
-      handoffText.title, 'secret-body-'],
+      handoffText.title, 'secret-body-', reason, 'secret-report-'],
     handoffId: sent.r.handoff.id as string,
+    declinedId: declinedSend.r.handoff.id as string,
   }
 }
 
 test('secrets stay out of the server log and the CLI output; joins are logged by name', async (t) => {
-  const { serverOutput, cliOutput, secrets, handoffId } = await exercise(t)
+  const { serverOutput, cliOutput, secrets, handoffId, declinedId } = await exercise(t)
   for (const secret of secrets) {
     assert.equal(serverOutput.includes(secret), false, 'server log contains a secret')
     assert.equal(cliOutput.includes(secret), false, 'CLI output contains a secret')
@@ -106,6 +123,8 @@ test('secrets stay out of the server log and the CLI output; joins are logged by
   assert.match(serverOutput, new RegExp(`handoff ${handoffId} from member m_[0-9a-f]{32} to sam stored`))
   assert.match(serverOutput, new RegExp(`handoff ${handoffId} offered to device d_[0-9a-f]{32}`))
   assert.match(serverOutput, new RegExp(`handoff ${handoffId} delivered to device d_[0-9a-f]{32}`))
+  assert.match(serverOutput, new RegExp(`handoff ${handoffId} done by device d_[0-9a-f]{32} \\(report 1\\)`))
+  assert.match(serverOutput, new RegExp(`handoff ${declinedId} declined by device d_[0-9a-f]{32} \\(with a reason\\)`))
   assert.match(serverOutput, /joined: member sam \(m_[0-9a-f]{32}\), device "home desktop" \(d_[0-9a-f]{32}\)/)
 })
 

@@ -12,7 +12,8 @@ import { type Config, ConfigError, loadConfig } from './config.ts'
 import { Connection, type ConnectionHost, DEFAULT_TIMINGS, type Timings } from './connection.ts'
 import { type Database, openDataDir, truncateWal } from './db.ts'
 import { Delivery } from './delivery.ts'
-import { expireOverdue } from './handoffs.ts'
+import { Feed } from './feed.ts'
+import { deleteOldRecords, deleteOldReports, expireOverdue } from './handoffs.ts'
 import { CLOSE_CODES, MAX_FRAME_BYTES } from './protocol.ts'
 import { type Clock, getTeamName, revokedAmong } from './team.ts'
 import { type TlsMaterial, loadTls } from './tls.ts'
@@ -40,8 +41,12 @@ export interface RunningServer {
   /** Live connections of authenticated devices, by device id. */
   readonly devices: ReadonlyMap<string, Connection>
   readonly delivery: Delivery
-  /** Runs the maintenance step now: expire overdue handoffs, truncate the write-ahead log. */
-  maintain(): { expired: string[]; truncated: boolean }
+  readonly feed: Feed
+  /**
+   * Runs the maintenance step now: expire overdue handoffs, delete old reports and records, push the changes,
+   * truncate the write-ahead log.
+   */
+  maintain(): { expired: string[]; reportsDeleted: string[]; recordsDeleted: string[]; truncated: boolean }
   /** Stops accepting, closes every connection with 1001, and closes the database. */
   close(): Promise<void>
 }
@@ -59,6 +64,7 @@ export async function startServer(port: number, options: ServerOptions): Promise
   const maintenanceIntervalMs = options.maintenanceIntervalMs ?? 60_000
   const healthCheck = options.healthCheck ?? (() => void getTeamName(db))
   const delivery = new Delivery(db, now, log)
+  const feed = new Feed(db, log)
 
   const devices = new Map<string, Connection>()
   const connections = new Set<Connection>()
@@ -78,6 +84,7 @@ export async function startServer(port: number, options: ServerOptions): Promise
     unregister(deviceId, connection, reason) {
       if (devices.get(deviceId) === connection) devices.delete(deviceId)
       delivery.onClosed(connection, reason)
+      feed.onClosed(connection)
     },
     ready(connection) {
       delivery.onReady(connection)
@@ -88,6 +95,13 @@ export async function startServer(port: number, options: ServerOptions): Promise
     },
     handoffAcknowledged(handoffId) {
       delivery.onAcknowledged(handoffId)
+    },
+    subscribeStatus(connection, cursor) {
+      if (cursor === null) feed.unsubscribe(connection)
+      else feed.subscribe(connection, cursor)
+    },
+    afterRequest() {
+      feed.publish()
     },
   }
 
@@ -130,7 +144,8 @@ export async function startServer(port: number, options: ServerOptions): Promise
     })
   })
 
-  // Revocations written by the admin command line (another process) reach live connections here.
+  // Revocations written by the admin command line (another process) reach live connections here, and so do the
+  // status changes it made (expiry on removing a member).
   const sweep = setInterval(() => {
     if (devices.size === 0) return
     try {
@@ -141,19 +156,28 @@ export async function startServer(port: number, options: ServerOptions): Promise
     } catch (error) {
       log(`revocation sweep failed: ${(error as Error).message}`)
     }
+    feed.publish()
   }, sweepIntervalMs)
 
-  // Expire overdue handoffs, then truncate the WAL so cleared text leaves the files (design D7).
-  const maintain = () => {
-    let expired: string[] = []
+  // Expire overdue handoffs, delete old reports and records, push the changes, then truncate the WAL so cleared
+  // text leaves the files (handoff-delivery design D7, handoff-return design D8).
+  const step = (what: string, fn: () => string[], each: (id: string) => string): string[] => {
     try {
-      expired = expireOverdue(db, now)
-      for (const id of expired) log(`handoff ${id} expired`)
+      const ids = fn()
+      for (const id of ids) log(each(id))
+      return ids
     } catch (error) {
-      log(`expiring handoffs failed: ${(error as Error).message}`)
+      log(`${what} failed: ${(error as Error).message}`)
+      return []
     }
+  }
+  const maintain = () => {
+    const expired = step('expiring handoffs', () => expireOverdue(db, now), (id) => `handoff ${id} expired`)
+    const reportsDeleted = step('deleting old reports', () => deleteOldReports(db, now), (id) => `report of handoff ${id} deleted`)
+    const recordsDeleted = step('deleting old records', () => deleteOldRecords(db, now), (id) => `record of handoff ${id} deleted`)
+    feed.publish()
     const truncated = truncateWal(db)
-    return { expired, truncated }
+    return { expired, reportsDeleted, recordsDeleted, truncated }
   }
   const maintenance = setInterval(maintain, maintenanceIntervalMs)
 
@@ -170,10 +194,12 @@ export async function startServer(port: number, options: ServerOptions): Promise
     port: (http.address() as AddressInfo).port,
     devices,
     delivery,
+    feed,
     maintain,
     close() {
       closing ??= (async () => {
         delivery.closing = true
+        feed.closing = true
         clearInterval(sweep)
         clearInterval(maintenance)
         const closed = new Promise<void>((resolve) => http.close(() => resolve()))

@@ -5,7 +5,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { spawn } from 'node:child_process'
-import { DATABASE_FILE, MIGRATIONS, SCHEMA_VERSION, SchemaTooNewError, openDataDir, openDatabaseFile, writeTransaction } from '../src/db.ts'
+import {
+  DATABASE_FILE,
+  MIGRATIONS,
+  SCHEMA_VERSION,
+  SchemaTooNewError,
+  latestSeq,
+  nextSeq,
+  openDataDir,
+  openDatabaseFile,
+  writeTransaction,
+} from '../src/db.ts'
 
 function tempDir(t: { after: (fn: () => void) => void }): string {
   const dir = mkdtempSync(join(tmpdir(), 'spekterm-server-db-'))
@@ -96,8 +106,8 @@ test('a version-1 database is upgraded in place, keeping its members', (t) => {
   raw.exec("PRAGMA user_version = 1; INSERT INTO members (id, handle, display_name, created_at) VALUES ('m_1', 'sam', 'Sam', 1)")
   raw.close()
   const db = openDatabaseFile(path)
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
-  assert.equal(SCHEMA_VERSION, 2)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3)
+  assert.equal(SCHEMA_VERSION, 3)
   assert.equal((db.prepare('SELECT handle FROM members').get() as { handle: string }).handle, 'sam')
   assert.equal((db.prepare('SELECT count(*) AS n FROM handoffs').get() as { n: number }).n, 0)
   db.close()
@@ -106,5 +116,75 @@ test('a version-1 database is upgraded in place, keeping its members', (t) => {
 test('secure_delete is on', (t) => {
   const db = openDataDir(tempDir(t))
   assert.equal((db.prepare('PRAGMA secure_delete').get() as { secure_delete: number }).secure_delete, 1)
+  db.close()
+})
+
+test('a version-2 database with handoffs is upgraded in place, numbered in sending order', (t) => {
+  const path = join(tempDir(t), DATABASE_FILE)
+  const raw = new DatabaseSync(path, { enableForeignKeyConstraints: true })
+  raw.exec(MIGRATIONS[0]!)
+  raw.exec(MIGRATIONS[1]!)
+  raw.exec(`PRAGMA user_version = 2;
+    INSERT INTO members (id, handle, display_name, created_at) VALUES ('m_a', 'alex', 'Alex', 1), ('m_s', 'sam', 'Sam', 1);
+    INSERT INTO devices (id, member_id, name, secret_hash, created_at) VALUES ('d_a', 'm_a', 'desk', x'00', 1), ('d_s', 'm_s', 'desk', x'00', 1);
+    INSERT INTO handoffs (id, client_id, sender_member_id, sender_device_id, recipient_member_id, enc, title, body,
+        request_hash, status, created_at, expires_at, delivered_at, delivered_device_id, ended_at) VALUES
+      ('h_3', 'c3', 'm_a', 'd_a', 'm_s', 'none', 'Waiting title', 'Waiting body', x'01', 'pending', 300, 9000, NULL, NULL, NULL),
+      ('h_1', 'c1', 'm_a', 'd_a', 'm_s', 'none', NULL, NULL, x'02', 'delivered', 100, 9000, 150, 'd_s', 150),
+      ('h_2', 'c2', 'm_a', 'd_a', 'm_s', 'none', NULL, NULL, x'03', 'expired', 200, 250, NULL, NULL, 250);`)
+  raw.close()
+  const db = openDatabaseFile(path)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3)
+  const rows = db.prepare('SELECT id, status, title, body, seq, changed_at, report_count FROM handoffs ORDER BY seq').all()
+  assert.deepEqual(
+    rows.map((r) => ({ ...r })),
+    [
+      { id: 'h_1', status: 'delivered', title: null, body: null, seq: 1, changed_at: 150, report_count: 0 },
+      { id: 'h_2', status: 'expired', title: null, body: null, seq: 2, changed_at: 250, report_count: 0 },
+      { id: 'h_3', status: 'pending', title: 'Waiting title', body: 'Waiting body', seq: 3, changed_at: 300, report_count: 0 },
+    ],
+  )
+  assert.equal((db.prepare("SELECT value FROM counters WHERE name = 'handoff_seq'").get() as { value: number }).value, 3)
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [])
+  db.close()
+})
+
+test('schema 3 keeps every reference and index of the handoffs table', (t) => {
+  const db = openDataDir(tempDir(t))
+  const fks = (db.prepare('PRAGMA foreign_key_list(handoffs)').all() as Array<{ from: string; table: string; to: string }>)
+    .map((f) => `${f.from}->${f.table}.${f.to}`)
+    .sort()
+  assert.deepEqual(fks, [
+    'delivered_device_id->devices.id',
+    'recipient_member_id->members.id',
+    'sender_device_id->devices.id',
+    'sender_member_id->members.id',
+  ])
+  const indexes = (db.prepare('PRAGMA index_list(handoffs)').all() as Array<{ name: string; unique: number; partial: number }>)
+    .map((i) => {
+      const columns = (db.prepare(`PRAGMA index_xinfo(${JSON.stringify(i.name)})`).all() as Array<{ name: string | null; key: number }>)
+        .filter((c) => c.key === 1)
+        .map((c) => c.name)
+      return `${i.unique ? 'unique ' : ''}${i.partial ? 'partial ' : ''}(${columns.join(', ')})`
+    })
+    .sort()
+  assert.deepEqual(indexes, [
+    '(changed_at)',
+    '(recipient_member_id, status, created_at)',
+    '(sender_member_id, created_at)',
+    '(sender_member_id, seq)',
+    'partial (report_at)',
+    'unique (id)',
+    'unique (sender_member_id, client_id)',
+    'unique (seq)',
+  ])
+  db.close()
+})
+
+test('nextSeq counts up from the counter', (t) => {
+  const db = openDataDir(tempDir(t))
+  assert.equal(latestSeq(db), 0)
+  assert.deepEqual([writeTransaction(db, () => nextSeq(db)), writeTransaction(db, () => nextSeq(db))], [1, 2])
+  assert.equal(latestSeq(db), 2)
   db.close()
 })

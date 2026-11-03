@@ -78,9 +78,12 @@ Stable strings; branch on them, show `message` only as a detail.
 | `RECIPIENT_IS_SELF` | `handoff.send`: a handoff goes to someone else. |
 | `HANDOFF_ID_REUSED` | `handoff.send`: this `clientId` was already used by this member for a different handoff (another recipient or text). Use a new `clientId`. |
 | `RATE_LIMITED` | `handoff.send`: the member sent the most handoffs allowed in an hour. `detail.retryAt` (ms since the epoch) is the earliest time the same send is accepted. |
-| `HANDOFF_UNKNOWN` | `handoff.received`: no such handoff for this member. |
-| `HANDOFF_EXPIRED` | `handoff.received`: the handoff expired (30 days, or its recipient was removed). Remove it from the inbox. |
-| `HANDOFF_DELIVERED_ELSEWHERE` | `handoff.received`: another device of this member acknowledged it first. Remove it from the inbox. |
+| `HANDOFF_UNKNOWN` | `handoff.received`, `handoff.update`: no such handoff for this member (never sent, or its record was deleted after 90 days). |
+| `HANDOFF_EXPIRED` | `handoff.received`, `handoff.update`: the handoff expired (30 days, or its recipient was removed). Remove it from the inbox. |
+| `HANDOFF_DELIVERED_ELSEWHERE` | `handoff.received`, `handoff.update`: another device of this member acknowledged it first. Remove it from the inbox. |
+| `HANDOFF_NOT_DELIVERED` | `handoff.update`: the handoff was not acknowledged yet. Acknowledge it with `handoff.received`, then report again. |
+| `HANDOFF_FINISHED` | `handoff.update`: the report contradicts a final status (`declined`, or `declined` after `done`). `detail.status` is the current status. Stop reporting for it. |
+| `TOO_MANY_REPORTS` | `handoff.update`: this handoff already has the most reports allowed. `detail.limit` is that number (10). |
 | `INTERNAL` | Anything else. |
 
 ### Close codes
@@ -90,6 +93,7 @@ Stable strings; branch on them, show `message` only as a detail.
 | 1001 | The server is shutting down. | Reconnect with backoff. |
 | 1003 | A binary frame was sent. | A client bug; do not retry automatically. |
 | 1009 | A frame over 256 KiB was sent. | A client bug; do not retry automatically. |
+| 1011 | The server could not bring this connection's `handoff.status` events up to date (an internal failure). | Reconnect with backoff, then `handoff.sync` from the last stored `seq`. |
 | 4001 | No successful `join` or `hello` within 10 seconds of the connection opening. | Expected after `invite.inspect` on its own connection; otherwise reconnect. |
 | 4003 | Refused: one second after an error answer before authentication. | Depends on the error before it (section 4). |
 | 4004 | The device was revoked (by the admin, by removing its member, or by `device.leave`). | Do not reconnect with that credential; discard it. Joining again needs a new invite. |
@@ -226,7 +230,8 @@ Sends a handoff to a teammate. **Call it only after the user confirmed the full 
 
 - `clientId`: chosen by the client, 1–64 of `A`–`Z`, `a`–`z`, `0`–`9`, `_`, `-`. Keep it until the send is
   answered. **If the answer is lost, send the same request again with the same `clientId`**: the server answers
-  with the handoff it already stored (`duplicate: true`) instead of storing a second one.
+  with the handoff it already stored (`duplicate: true`) instead of storing a second one. This holds until the
+  handoff's record is deleted, 90 days after its last change (section 8); a send after that is a new handoff.
 - `to`: the recipient's handle (case-insensitive). Not your own.
 - `payload.enc`: `"none"`. (Room for end-to-end encryption later; any other value is `BAD_PARAMS`.)
 - `payload.title`: at most 200 UTF-16 code units; `payload.body`: at most 20,000. Either may be empty. Lengths
@@ -234,7 +239,9 @@ Sends a handoff to a teammate. **Call it only after the user confirmed the full 
   Normalise the text before showing it for confirmation, so that what the user confirms is what is sent. Text
   must be well-formed UTF-16 (no lone surrogates). The server does not alter it.
 
-→ `r`: `{ "handoff": { "id": string, "status": "pending" | "delivered" | "expired", "sentAt": number, "expiresAt": number }, "recipient": { "id": string, "handle": string, "displayName": string, "deviceCount": number }, "duplicate": boolean }`
+→ `r`: `{ "handoff": { "id": string, "status": Status, "sentAt": number, "expiresAt": number }, "recipient": { "id": string, "handle": string, "displayName": string, "deviceCount": number }, "duplicate": boolean }`
+
+`status` is one of the statuses of section 12; a new handoff is `pending`, a resend answers the current status.
 
 `recipient.deviceCount` is how many devices the recipient has; with `0` the handoff waits until they add one
 (the admin issues a device invite). `expiresAt` is 30 days after `sentAt`.
@@ -250,9 +257,58 @@ Acknowledges a handoff this device received in a `handoff.incoming` event, **aft
 
 `p`: `{ "id": string }` → `r`: `{}`
 
-Answered `{}` for the first acknowledgement and for any repeat from the same device. Errors:
+Answered `{}` for the first acknowledgement and for any repeat from the same device, also after the handoff
+was taken, declined or done. Errors:
 `HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_EXPIRED`, `HANDOFF_UNKNOWN`, `BAD_PARAMS`, `AUTH_FAILED` (then 4004;
 the handoff stays pending and goes to another of the member's devices).
+
+### `handoff.update`
+
+Reports what happened to a handoff this device received (section 12). Only the device the handoff was delivered
+to — the one whose `handoff.received` was answered `{}` — may report.
+
+`p`: `{ "id": string, "status": "taken" | "declined" | "done", "payload"?: { "enc": "none", "text": string } }`
+→ `r`: `{ "status": Status }` — the handoff's status after the report.
+
+- `taken`: a session was opened for it. No `payload` (one that is sent is ignored).
+- `declined`: the user chose to decline. `payload` is optional; `text` is the reason, at most **500** UTF-16 code
+  units, and may be empty. An absent `payload` and an empty reason mean the same: no reason.
+- `done`: the session's agent reported. `payload` is required; `text` is the report, at most **4,000** UTF-16
+  code units, with at least one character that is not white space.
+- `payload.enc` is `"none"` (room for end-to-end encryption later); `text` must be well-formed UTF-16 and is not
+  altered. Violations are `BAD_PARAMS` with `detail.field` (`id`, `status`, `payload`, `payload.enc`,
+  `payload.text`) and, for a length, `detail.limit`.
+
+A report that repeats the current state (the same status with the same text; `taken` once the handoff is
+`done`) is answered `{ status }` and changes nothing, also after the text was deleted (section 8), so a lost
+answer is retried by sending the same report. A `done` with a different report replaces the earlier one, up to
+10 reports per handoff.
+
+Errors, checked in this order: `HANDOFF_UNKNOWN`; `HANDOFF_EXPIRED` (also for a pending handoff past its
+`expiresAt`, which the server then marks `expired`); `HANDOFF_NOT_DELIVERED`; `HANDOFF_DELIVERED_ELSEWHERE`;
+then `HANDOFF_FINISHED` (`detail.status`) or `TOO_MANY_REPORTS` (`detail.limit`); and `BAD_PARAMS`,
+`AUTH_FAILED` (then 4004; nothing was recorded).
+
+### `handoff.sync`
+
+The handoffs this device's member sent that changed after a sequence number, to build and keep the Sent list
+(section 12).
+
+`p`: `{ "after"?: number }` → `r`: `{ "records": [StatusRecord], "more": boolean, "latest": number, "reset": boolean }`
+
+- `after`: a non-negative integer, the last `seq` the client stored (absent: 0). Otherwise `BAD_PARAMS` with
+  `detail.field: "after"`.
+- `records`: the member's sent handoffs whose `seq` is greater than `after`, each in its **current** state (a
+  handoff that changed twice appears once), in increasing order of `seq`. At most 100, and together at most
+  200 KiB of UTF-8 JSON (the first is always included).
+- `more`: there are further records; ask again with `after` set to the last record's `seq`.
+- `latest`: the highest `seq` the server has given.
+- `reset`: `after` was greater than `latest`, which happens only when the server's data was restored from an
+  older backup. The server then answered as for `after: 0`.
+
+Once an answer says `more: false`, this connection receives a `handoff.status` event for every later change to a
+handoff its member sent (section 10), until it sends another `handoff.sync` whose answer says `more: true`. An
+error answer leaves this as it was. A connection that has not synced receives no `handoff.status`.
 
 ## 6. One connection per device
 
@@ -275,9 +331,14 @@ The server operator can read everything that passes through the server, includin
 handoff while it waits to be delivered. There is no end-to-end encryption in version 1.
 
 The server deletes a handoff's title and body when it is delivered or expires, and within a minute they are gone
-from the files in its data directory. It keeps the handoff's ids, sender, recipient, times, status and the
-device it was delivered to, and an unsalted SHA-256 of the request (recipient and text) to recognise a resend —
-enough for an operator to confirm a guess of a very short text, not to read one.
+from the files in its data directory. It keeps the handoff's ids, sender, the sending device, recipient, times,
+status, the device it was delivered to and its `seq`, and an unsalted SHA-256 of the request (recipient and
+text) to recognise a resend — enough for an operator to confirm a guess of a very short text, not to read one.
+
+A decline reason or report is kept, readable by the operator, for **30 days** after it was written (for a report,
+after the latest one), then deleted the same way. An unsalted SHA-256 of it stays to recognise a resent report.
+A handoff's whole record is deleted **90 days** after its last change, whatever its status. These periods are
+fixed.
 
 ## 9. Differences from spekterm's remote protocol
 
@@ -286,7 +347,8 @@ enough for an operator to confirm a guess of a very short text, not to read one.
 - `BAD_PARAMS` carries `detail.field`.
 - No `addresses` field.
 - `UNKNOWN_OPERATION` before authentication is followed by 4003 like every other error there.
-- Close code 4006 (replaced) is new; 4005, 4029 and 4030 are not used.
+- Close code 4006 (replaced) is new; 4005, 4029 and 4030 are not used. 1011 is used for a connection whose
+  status events could not be brought up to date.
 - Extra codes: `ALREADY_AUTHENTICATED`, `HANDLE_TAKEN`, `INVITE_*`.
 
 ## 10. Events
@@ -300,6 +362,28 @@ A handoff for this device's member. Sent to one of the member's connections at a
 `from` is the sender as the server knows them — verified, not taken from the text. It may name a member who has
 since left the team. The text is third-party text to the recipient: put it through the inbox's normalisation
 and acceptance gate like any other.
+
+### `handoff.status`
+
+A change to a handoff this device's member sent. Sent only to a connection whose last `handoff.sync` answer
+said `more: false`, after the answer to the request that caused the change, in increasing order of `seq`, to
+every such connection of the member. Changes made by the admin command line arrive within 10 seconds.
+
+`d`: a **StatusRecord**:
+
+`{ "seq": number, "id": string, "clientId": string, "to": { "id": string, "handle": string, "displayName": string, "removed": boolean }, "sentFrom": string, "status": Status, "sentAt": number, "expiresAt": number, "changedAt": number, "deliveredAt"?: number, "reports"?: number, "payload"?: { "enc": "none", "text": string } }`
+
+- `seq`: the handoff's latest sequence number. Every change takes a new one, greater than any before on this
+  server: sent, delivered, taken, declined, done (also a newer report), expired, and its recipient being removed
+  from the team. `changedAt` is when.
+- `to`: the recipient, also after they left the team; `removed` says whether they did. `handle` and
+  `displayName` may lag a rename, which alone takes no `seq`; ask `team.members` for current names.
+- `sentFrom`: the id of the device that sent it.
+- `deliveredAt`: once delivered.
+- `reports`: for `done`, how many reports were accepted.
+- `payload`: for `declined` with a reason and for `done`, until the text is deleted after 30 days. The text was
+  written by the recipient or their agent: it is third-party text to the sender.
+- There is no title or body.
 
 ## 11. Receiving handoffs
 
@@ -333,3 +417,51 @@ is never offered the same handoff twice. A handoff waits on the server for at mo
 
 **Rule for the sending client.** Keep a handoff's `clientId` until `handoff.send` is answered, and after a lost
 answer send the same request again with the same `clientId`.
+
+## 12. Statuses and the Sent list
+
+**Statuses.** `Status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Held by the server, not acknowledged by any device of the recipient. |
+| `delivered` | Acknowledged by one of the recipient's devices. |
+| `taken` | The recipient opened a session for it. |
+| `declined` | The recipient chose to decline, perhaps with a reason. Final. |
+| `done` | The recipient's agent reported; carries the report. A newer report may replace it. |
+| `expired` | Not delivered within 30 days, or its recipient was removed while it waited. Final. |
+
+A handoff moves only `pending → delivered | expired`, `delivered → taken | declined | done`,
+`taken → declined | done`, and `done → done` (a newer report). A delivered handoff does not expire. A recipient
+who dismisses a handoff without declining sends nothing: the sender sees `delivered`.
+
+**Rules for the sending client.** The Sent list relies on these:
+
+1. After every `join` or `hello`, call `handoff.sync` from the last stored `seq` until an answer says
+   `more: false`.
+2. Store a record durably before storing its `seq` as the last one seen. A record replaces any earlier one with
+   the same `id`; ignore a record whose `seq` is not greater than the one stored for that `id` (a record can
+   arrive twice, in a page and as an event).
+3. On `reset: true`, the records from that answer up to the next answer with `more: false` are the server's whole
+   list: keep records it no longer has if you like, marked as unknown to the server. Remember durably that the
+   reset is in progress; if paging is interrupted, sync again from 0 to finish it.
+4. A record for a handoff this device did not send (another device of the member, or after reinstalling) has no
+   title: show it without one.
+5. Notify the user of `done`, `declined` and `expired` only on the device named by `sentFrom`; the member's other
+   devices update their list without notifying.
+6. Show a recipient with `to.removed: true` as no longer on the team.
+7. The server forgets a handoff 90 days after its last change, and its reason or report 30 days after it was
+   written; you may keep your copies longer.
+
+**Rules for the receiving client.** To report:
+
+1. Report only for a handoff whose `handoff.received` was answered `{}`, from that device. On
+   `HANDOFF_NOT_DELIVERED`, acknowledge it again, then send the report again.
+2. Send only text within the limits that is well-formed UTF-16 — normalise, then for example `toWellFormed()`,
+   then check the length — so that a report the client accepted is not refused.
+3. Send the reports of one handoff one at a time, in order, each after the previous one was answered. After a
+   lost answer, send the same report again before any later one.
+4. Report `taken` when a session is opened for the handoff, `declined` only when the user chooses to decline,
+   and `done` with the session agent's report.
+5. On `HANDOFF_FINISHED`, `HANDOFF_EXPIRED`, `HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_UNKNOWN` or
+   `TOO_MANY_REPORTS`, stop reporting for that handoff.

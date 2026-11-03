@@ -240,10 +240,11 @@ operations to the same list, as spekterm does for its remote protocol.
 
 | Direction | Message | Purpose |
 |---|---|---|
-| desktop → server | `hello` | Authenticate the device, negotiate the protocol version, resume from the last seen event. |
+| desktop → server | `hello` | Authenticate the device, negotiate the protocol version. |
 | desktop → server | `handoff.send` | Send a confirmed handoff to a member. |
 | desktop → server | `handoff.received` | Acknowledge that an item is safely in the inbox (moves it to `delivered`). |
 | desktop → server | `handoff.update` | `taken`, `declined` (with an optional reason), `done` (with the report). |
+| desktop → server | `handoff.sync` | Resume the sender's list from the last seen change; then receive `handoff.status`. |
 | desktop → server | `presence.set` | Visible or hidden. |
 | server → desktop | `handoff.incoming` | A handoff for this member. |
 | server → desktop | `handoff.status` | A status change on a handoff this member sent. |
@@ -273,8 +274,9 @@ value, not a new message format.
 - **One container**, one data directory (SQLite), one port. Node 22, matching spekterm's toolchain.
 - **Admin command line** inside the container: create an invite, list members and devices, remove a member,
   revoke a device.
-- **Retention.** Bodies and reports are deleted a fixed time after a handoff reaches a final state (default
-  30 days); only the metadata needed for the sender's list is kept longer, and it is bounded too.
+- **Retention.** A handoff's title and body are deleted when it is delivered or expires; a decline reason or
+  report 30 days after it was written; the record the sender's list needs 90 days after its last change. The
+  periods are fixed.
 - **Backups** are a copy of the data directory.
 - **Upgrades.** The server states the protocol versions it speaks; spekterm says plainly when its version and
   the server's do not meet, instead of failing silently.
@@ -330,10 +332,7 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 
 ## 13. Open questions
 
-1. **How the sender's agent learns the outcome later.** A receipt covers the send; does the sending session
-   also hear about `taken` and `done` (for example through its relations file), or only the user? Decide in
-   M2, which delivers those statuses.
-2. **Repository name.** `spekterm-server`, under `spekhq`.
+1. **Repository name.** `spekterm-server`, under `spekhq`.
 
 ### 13.1 Decided (2026-11-03)
 
@@ -360,3 +359,12 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 - **The device secret stays in spekterm's secrets file** (0600), not the OS keyring (2026-11-03). Accepted
   consequence: an agent's shell command can read it and, with it, connect as the user and send handoffs
   without the desktop's confirmation (§7.3); the hourly rate (§7.6) and revoking the device are the limits.
+- **The sending agent learns the status, not the report** (M2, 2026-11-03; was open question 1). The sending
+  session sees `taken`, `declined`, `done` and `expired` through its relations file, as it sees a same-machine
+  child's state. The report and the decline reason are written by another person or their agent, so they are
+  third-party text to the sender's agent: spekterm shows them to the user in the Sent list and does not put them
+  into the agent's context on its own; the user can pass them on (§7.2) (handoff-return, design D10).
+- **Titles are not kept for the sender's other devices** (M2, 2026-11-03). The server deletes title and body on
+  delivery, so a sent handoff appears without its title on the sender's other devices or after reinstalling; the
+  sending device keeps its own copy. Keeping titles would make them the one piece of text the server holds for
+  90 days (handoff-return, design D9).

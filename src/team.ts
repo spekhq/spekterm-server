@@ -5,7 +5,7 @@
  * inside it, because the admin command line writes the same database from another process.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { type Database, writeTransaction } from './db.ts'
+import { type Database, nextSeq, writeTransaction } from './db.ts'
 import { ProtocolError, badParams } from './errors.ts'
 
 export type Clock = () => number
@@ -451,14 +451,23 @@ export function renameMember(db: Database, handle: string, value: unknown): Memb
 
 /**
  * Inside a transaction: marks the member removed, revokes their devices, cancels their device invites, and
- * expires the handoffs waiting for them, clearing their text (handoff-delivery, design D6). Handoffs the member
- * sent are left to be delivered.
+ * expires the handoffs waiting for them, clearing their text (handoff-delivery, design D6). Every other handoff
+ * addressed to them keeps its status but takes a new sequence number, so its sender's devices learn that the
+ * recipient left (handoff-return, design D12). Handoffs the member sent are left to be delivered.
  */
 function removeMemberById(db: Database, memberId: string, at: number): void {
-  db.prepare(
-    `UPDATE handoffs SET status = 'expired', ended_at = ?, title = NULL, body = NULL
-     WHERE recipient_member_id = ? AND status = 'pending'`,
-  ).run(at, memberId)
+  const addressed = db
+    .prepare('SELECT id, status FROM handoffs WHERE recipient_member_id = ? ORDER BY created_at, id')
+    .all(memberId) as Array<{ id: string; status: string }>
+  const expire = db.prepare(
+    `UPDATE handoffs SET status = 'expired', ended_at = ?, title = NULL, body = NULL, seq = ?, changed_at = ?
+     WHERE id = ?`,
+  )
+  const touch = db.prepare('UPDATE handoffs SET seq = ?, changed_at = ? WHERE id = ?')
+  for (const h of addressed) {
+    if (h.status === 'pending') expire.run(at, nextSeq(db), at, h.id)
+    else touch.run(nextSeq(db), at, h.id)
+  }
   db.prepare('UPDATE members SET removed_at = ? WHERE id = ?').run(at, memberId)
   db.prepare('UPDATE devices SET revoked_at = ? WHERE member_id = ? AND revoked_at IS NULL').run(at, memberId)
   db.prepare(

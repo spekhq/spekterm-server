@@ -79,6 +79,55 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX handoffs_recipient_pending ON handoffs (recipient_member_id, status, created_at);
   CREATE INDEX handoffs_sender_created ON handoffs (sender_member_id, created_at);
   `,
+  // 3: statuses back to the sender (handoff-return, design D7). SQLite cannot change a CHECK in place, so the
+  // table is rebuilt; every column, reference and constraint of schema 2 is kept. Existing rows are numbered in
+  // the order they were sent, and the counter starts after them.
+  `
+  CREATE TABLE handoffs_new (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    sender_member_id TEXT NOT NULL REFERENCES members (id),
+    sender_device_id TEXT NOT NULL REFERENCES devices (id),
+    recipient_member_id TEXT NOT NULL REFERENCES members (id),
+    enc TEXT NOT NULL,
+    title TEXT,
+    body TEXT,
+    request_hash BLOB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'taken', 'declined', 'done', 'expired')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    delivered_device_id TEXT REFERENCES devices (id),
+    ended_at INTEGER,
+    seq INTEGER NOT NULL UNIQUE,
+    changed_at INTEGER NOT NULL,
+    report_enc TEXT,
+    report_text TEXT,
+    report_at INTEGER,
+    report_hash BLOB,
+    report_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (sender_member_id, client_id)
+  );
+  INSERT INTO handoffs_new (id, client_id, sender_member_id, sender_device_id, recipient_member_id, enc, title, body,
+      request_hash, status, created_at, expires_at, delivered_at, delivered_device_id, ended_at, seq, changed_at)
+    SELECT id, client_id, sender_member_id, sender_device_id, recipient_member_id, enc, title, body,
+      request_hash, status, created_at, expires_at, delivered_at, delivered_device_id, ended_at,
+      row_number() OVER (ORDER BY created_at, id), coalesce(ended_at, created_at)
+    FROM handoffs;
+  DROP TABLE handoffs;
+  ALTER TABLE handoffs_new RENAME TO handoffs;
+  CREATE INDEX handoffs_recipient_pending ON handoffs (recipient_member_id, status, created_at);
+  CREATE INDEX handoffs_sender_created ON handoffs (sender_member_id, created_at);
+  CREATE INDEX handoffs_sender_seq ON handoffs (sender_member_id, seq);
+  CREATE INDEX handoffs_changed ON handoffs (changed_at);
+  CREATE INDEX handoffs_report_at ON handoffs (report_at) WHERE report_text IS NOT NULL;
+
+  CREATE TABLE counters (
+    name TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+  );
+  INSERT INTO counters (name, value) VALUES ('handoff_seq', (SELECT count(*) FROM handoffs));
+  `,
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
@@ -157,6 +206,33 @@ export function truncateWal(db: Database): boolean {
     return false
   } finally {
     db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`)
+  }
+}
+
+/**
+ * The next handoff sequence number (handoff-return, design D4). Call only inside a write transaction: values are
+ * then taken in the order transactions commit, across both processes, so a reader that sees a number has seen
+ * every lower one.
+ */
+export function nextSeq(db: Database): number {
+  const row = db.prepare("UPDATE counters SET value = value + 1 WHERE name = 'handoff_seq' RETURNING value").get() as {
+    value: number
+  }
+  return row.value
+}
+
+/** The highest handoff sequence number given so far. */
+export function latestSeq(db: Database): number {
+  return (db.prepare("SELECT value FROM counters WHERE name = 'handoff_seq'").get() as { value: number }).value
+}
+
+/** Runs `fn` inside one deferred read transaction, so every statement in it sees the same snapshot. */
+export function readTransaction<T>(db: Database, fn: () => T): T {
+  db.exec('BEGIN')
+  try {
+    return fn()
+  } finally {
+    if (db.isTransaction) db.exec('COMMIT')
   }
 }
 

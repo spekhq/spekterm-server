@@ -90,3 +90,40 @@ test('the admin removing the recipient expires the handoff; a removed sender\'s 
   assert.equal(samClient.events('handoff.incoming').length, 1)
   samClient.close()
 })
+
+test("the sender's sync resumes from its stored seq across a restart, returning the finished handoff once", async (t) => {
+  const dir = tempDir(t)
+  const { alex, sam } = seed(dir)
+  const first = await spawnServer({ DATA_DIR: dir })
+  t.after(() => first.child.kill('SIGKILL'))
+  const sender = await connect(first.port, alex)
+  const sent = await sender.request('handoff.send', { clientId: 'r1', to: 'sam', payload: { enc: 'none', title: 'T', body: 'B' } })
+  const id = sent.r.handoff.id as string
+  const synced = await sender.request('handoff.sync', { after: 0 })
+  assert.deepEqual(synced.r.records.map((r: { id: string }) => r.id), [id])
+  const stored = synced.r.records.at(-1).seq as number
+  sender.close()
+  await sender.closed
+
+  const desktop = await connect(first.port, sam)
+  await desktop.nextEvent('handoff.incoming')
+  assert.deepEqual((await desktop.request('handoff.received', { id })).r, {})
+  assert.deepEqual((await desktop.request('handoff.update', { id, status: 'taken' })).r, { status: 'taken' })
+  const report = { enc: 'none', text: 'Added the refund field.' }
+  assert.deepEqual((await desktop.request('handoff.update', { id, status: 'done', payload: report })).r, { status: 'done' })
+  desktop.close()
+  first.child.kill('SIGTERM')
+  assert.equal(await first.exited, 0)
+
+  const second = await spawnServer({ DATA_DIR: dir })
+  t.after(() => second.child.kill('SIGKILL'))
+  const back = await connect(second.port, alex)
+  const resumed = await back.request('handoff.sync', { after: stored })
+  assert.equal(resumed.r.reset, false)
+  assert.deepEqual(
+    resumed.r.records.map((r: { id: string; status: string; payload?: unknown }) => [r.id, r.status, r.payload]),
+    [[id, 'done', report]],
+  )
+  assert.equal(resumed.r.more, false)
+  back.close()
+})

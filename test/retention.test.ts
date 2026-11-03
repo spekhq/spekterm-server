@@ -101,3 +101,93 @@ test('shutting down with a short maintenance interval is clean', async (t) => {
   await new Promise((resolve) => setTimeout(resolve, 30))
   assert.equal(logs.filter((l) => /failed/.test(l)).length, 0)
 })
+
+// --- reasons, reports and records (handoff-return, design D8) -------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000
+
+/** Pieces of a text that would survive in a file if any copy of it did. */
+function textFound(dir: string, text: string): string[] {
+  const hits: string[] = []
+  const parts: string[] = []
+  for (let i = 0; i + 40 <= text.length; i += 397) parts.push(text.slice(i, i + 40))
+  for (const file of readdirSync(dir)) {
+    const bytes = readFileSync(join(dir, file))
+    for (const part of parts) if (bytes.includes(Buffer.from(part))) hits.push(`${file}: ${part.slice(0, 12)}…`)
+  }
+  return hits
+}
+
+async function reporting(t: Parameters<typeof testServer>[0]) {
+  let clock = Date.now()
+  const s = await testServer(t, { now: () => clock, maintenanceIntervalMs: 3_600_000 })
+  const alex = seedMember(s.db, 'alex')
+  const sam = seedMember(s.db, 'sam')
+  const sender = await TestClient.open(s.url)
+  await sender.request('hello', { ...P, deviceId: alex.device.id, deviceSecret: alex.deviceSecret })
+  const desktop = await TestClient.open(s.url)
+  await desktop.request('hello', { ...P, deviceId: sam.device.id, deviceSecret: sam.deviceSecret })
+  t.after(() => {
+    sender.close()
+    desktop.close()
+  })
+  let n = 0
+  const delivered = async () => {
+    const sent = await sender.request('handoff.send', { clientId: `r${++n}`, to: 'sam', payload: { enc: 'none', title: 't', body: 'b' } })
+    const id = sent.r.handoff.id as string
+    await desktop.nextEvent('handoff.incoming')
+    assert.deepEqual((await desktop.request('handoff.received', { id })).r, {})
+    return id
+  }
+  const update = (id: string, status: string, text?: string) =>
+    desktop.request('handoff.update', { id, status, ...(text === undefined ? {} : { payload: { enc: 'none', text } }) })
+  const records = async () => (await sender.request('handoff.sync', { after: 0 })).r.records as Array<{ id: string; payload?: unknown }>
+  return { ...s, advance: (ms: number) => (clock += ms), delivered, update, records }
+}
+
+test('a report and a reason are in no file one maintenance step after their 30 days; the records stay', async (t) => {
+  const { dir, server, advance, delivered, update, records } = await reporting(t)
+  const report = randomBytes(2000).toString('hex') // 4,000 code units
+  const reason = randomBytes(250).toString('hex') // 500 code units
+  const done = await delivered()
+  assert.equal((await update(done, 'done', report)).ok, true)
+  const declined = await delivered()
+  assert.equal((await update(declined, 'declined', reason)).ok, true)
+  assert.ok(textFound(dir, report).length > 0, 'the report is stored')
+  advance(30 * DAY - 1)
+  assert.deepEqual(server.maintain().reportsDeleted, [])
+  advance(1)
+  const step = server.maintain()
+  assert.deepEqual([step.reportsDeleted.sort(), step.truncated], [[done, declined].sort(), true])
+  assert.deepEqual(textFound(dir, report), [])
+  assert.deepEqual(textFound(dir, reason), [])
+  const kept = await records()
+  assert.deepEqual(kept.map((r) => [r.id, r.payload]).sort(), [[done, undefined], [declined, undefined]].sort())
+})
+
+test('a newer report restarts its 30 days', async (t) => {
+  const { server, advance, delivered, update, records } = await reporting(t)
+  const id = await delivered()
+  await update(id, 'done', 'first')
+  advance(20 * DAY)
+  await update(id, 'done', 'second')
+  advance(10 * DAY)
+  assert.deepEqual(server.maintain().reportsDeleted, [])
+  assert.deepEqual((await records())[0]!.payload, { enc: 'none', text: 'second' })
+  advance(20 * DAY)
+  assert.deepEqual(server.maintain().reportsDeleted, [id])
+})
+
+test('records go 90 days after their last change, done or still taken; a late report is HANDOFF_UNKNOWN', async (t) => {
+  const { server, advance, delivered, update, records } = await reporting(t)
+  const done = await delivered()
+  await update(done, 'done', 'finished')
+  const taken = await delivered()
+  await update(taken, 'taken')
+  advance(90 * DAY - 1)
+  assert.deepEqual(server.maintain().recordsDeleted, [])
+  advance(1)
+  assert.deepEqual(server.maintain().recordsDeleted.sort(), [done, taken].sort())
+  assert.deepEqual(await records(), [])
+  assert.equal((await update(taken, 'done', 'late')).e?.code, 'HANDOFF_UNKNOWN')
+})

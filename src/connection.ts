@@ -7,6 +7,7 @@ import type { Database } from './db.ts'
 import { type ErrorCode, ProtocolError } from './errors.ts'
 import { CLOSE_CODES, OPERATIONS, type OperationContext, parseFrame } from './protocol.ts'
 import type { CloseReason, DeliveryTarget } from './delivery.ts'
+import type { FeedTarget } from './feed.ts'
 import { type Clock, type Identity, isDeviceActive, touchDevice } from './team.ts'
 
 export interface Timings {
@@ -42,11 +43,15 @@ export interface ConnectionHost {
   handoffRatePerHour: number
   handoffSent(handoffId: string, recipientMemberId: string): void
   handoffAcknowledged(handoffId: string): void
+  /** Subscribes the connection to its member's status events from `cursor`, or ends it (null). */
+  subscribeStatus(connection: Connection, cursor: number | null): void
+  /** An authenticated request was answered (successfully or not); push the status changes it may have made. */
+  afterRequest(): void
 }
 
 type State = 'pending' | 'refusing' | 'authenticated' | 'closed'
 
-export class Connection implements DeliveryTarget {
+export class Connection implements DeliveryTarget, FeedTarget {
   readonly #ws: WebSocket
   readonly #host: ConnectionHost
   #state: State = 'pending'
@@ -85,6 +90,11 @@ export class Connection implements DeliveryTarget {
   /** Closes the connection because its device was found revoked. */
   closeRevoked(): void {
     this.close(CLOSE_CODES.REVOKED, 'device revoked')
+  }
+
+  /** Closes the connection because the server could not bring its status events up to date. */
+  closeInternal(): void {
+    this.close(CLOSE_CODES.INTERNAL_ERROR, 'internal error')
   }
 
   #stillActive(): boolean {
@@ -210,6 +220,7 @@ export class Connection implements DeliveryTarget {
       handoffRatePerHour: this.#host.handoffRatePerHour,
       handoffSent: (id, recipient) => this.#host.handoffSent(id, recipient),
       handoffAcknowledged: (id) => this.#host.handoffAcknowledged(id),
+      subscribeStatus: (cursor) => this.#host.subscribeStatus(this, cursor),
       authenticateAs: (identity: Identity) => this.#authenticated(identity),
       closeAfterAnswer: (code) => {
         closeCode = code
@@ -226,9 +237,13 @@ export class Connection implements DeliveryTarget {
         this.#host.log(`operation ${m} failed: ${(error as Error).stack ?? String(error)}`)
         this.#answerError(id, 'INTERNAL', 'the server could not carry out the request')
       }
+      // A refused acknowledgement or report may have committed an expiry (handoff-return, design D5).
+      if (operation.auth === 'device') this.#host.afterRequest()
       return
     }
     this.#send({ t: 'res', id, ok: true, r: result })
+    // After the answer, so a sender's own change reaches it behind the answer that caused it.
+    if (operation.auth === 'device') this.#host.afterRequest()
     // Ready only now, after the answer: events must not reach the device before its join / hello answer.
     // Called unconditionally and synchronously, so no other connection can become ready in between.
     if (!wasAuthenticated && this.#state === 'authenticated') this.#host.ready(this)

@@ -98,6 +98,11 @@ gone from the files in the data directory (deleted space is zeroed and the write
 copy you took earlier still has them). What stays is who sent what to whom and when, its status, and an unsalted
 hash of the request used to recognise a resend.
 
+When the recipient declines with a reason or their agent reports back, that text is kept for **30 days** after it
+was written, so the sender's devices can fetch it, and is then deleted the same way; an unsalted hash of it stays to
+recognise a resent report. A handoff's whole record is deleted **90 days** after its last change. These periods
+are fixed. Restoring an older backup can make a device miss status changes made after that backup.
+
 ## 6. Backups and upgrades
 
 The whole state is the SQLite database in the volume. To back up, stop the container and copy the volume's

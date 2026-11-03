@@ -14,7 +14,7 @@ import {
   listTeamMembers,
   renameDevice,
 } from './team.ts'
-import { acknowledge, sendHandoff, validateSend } from './handoffs.ts'
+import { acknowledge, sendHandoff, syncSent, updateStatus, validateSend, validateUpdate } from './handoffs.ts'
 import { SERVER_NAME, SERVER_VERSION } from './version.ts'
 
 /** Protocol versions this server speaks. */
@@ -36,12 +36,14 @@ export const CLOSE_CODES = {
   REVOKED: 4004,
   /** Replaced by a newer connection of the same device. Do not reconnect on its own. */
   REPLACED: 4006,
+  /** The server could not bring this connection's status events up to date. Reconnect with backoff. */
+  INTERNAL_ERROR: 1011,
 } as const
 
 export const MAX_FRAME_BYTES = 256 * 1024
 
 /** Event kinds the server sends (`docs/protocol.md`, "Events"). */
-export const EVENT_KINDS = ['handoff.incoming'] as const
+export const EVENT_KINDS = ['handoff.incoming', 'handoff.status'] as const
 
 export interface Request {
   id: number | string
@@ -93,6 +95,8 @@ export interface OperationContext {
   handoffSent(handoffId: string, recipientMemberId: string): void
   /** A handoff was acknowledged; end its lease. */
   handoffAcknowledged(handoffId: string): void
+  /** Subscribes this connection to its member's status events from `cursor`, or ends the subscription (null). */
+  subscribeStatus(cursor: number | null): void
   /** Marks the connection as authenticated as this device (closing an older connection of it). */
   authenticateAs(identity: Identity): void
   /** Closes the connection with this code once the answer has been sent. */
@@ -185,6 +189,31 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
       ctx.handoffAcknowledged(p.id as string)
       ctx.log(`handoff ${String(p.id)} delivered to device ${ctx.deviceId}`)
       return {}
+    },
+  },
+  'handoff.update': {
+    auth: 'device',
+    handler(p, ctx) {
+      const request = validateUpdate(p)
+      const result = updateStatus(ctx.db, request, { memberId: ctx.memberId!, deviceId: ctx.deviceId! }, ctx.now)
+      const detail = !result.changed
+        ? ' (unchanged)'
+        : result.status === 'done'
+          ? ` (report ${result.reports})`
+          : result.status === 'declined' && request.payload !== null && request.payload.text !== ''
+            ? ' (with a reason)'
+            : ''
+      ctx.log(`handoff ${request.id} ${request.status} by device ${ctx.deviceId}${detail}`)
+      return { status: result.status }
+    },
+  },
+  'handoff.sync': {
+    auth: 'device',
+    handler(p, ctx) {
+      const { result, cursor } = syncSent(ctx.db, ctx.memberId!, p.after)
+      // Last, once the answer is built: an error answer leaves the subscription as it was (design D5).
+      ctx.subscribeStatus(result.more ? null : cursor)
+      return result
     },
   },
   'device.leave': {

@@ -43,5 +43,5 @@ test('registry: pre-authentication and authenticated operations', () => {
     Object.entries(OPERATIONS).filter(([, o]) => o.auth === 'none').map(([n]) => n).sort(),
     ['hello', 'invite.inspect', 'join'],
   )
-  assert.deepEqual(authenticatedOperations(), ['device.leave', 'device.rename', 'handoff.received', 'handoff.send', 'team.members'])
+  assert.deepEqual(authenticatedOperations(), ['device.leave', 'device.rename', 'handoff.received', 'handoff.send', 'handoff.sync', 'handoff.update', 'team.members'])
 })
