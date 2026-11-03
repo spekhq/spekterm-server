@@ -10,10 +10,11 @@ container, logging and the guarantee that the server only accepts connections an
 
 The server and the admin command line SHALL read their configuration from environment variables: `PORT`
 (default `8080`), `DATA_DIR` (default `/data`), `PUBLIC_URL` (the address clients use, `wss://host` or
-`wss://host:port`, with no path; a trailing `/` is dropped; no default, and only `invite create` needs it), and
-`TLS_CERT` / `TLS_KEY` (paths to a PEM certificate chain and key; both or neither). An invalid value SHALL stop
-the server at startup with a message naming the variable. The certificate is read at startup; replacing it
-takes effect on restart.
+`wss://host:port`, with no path; a trailing `/` is dropped; no default, and only `invite create` needs it),
+`TLS_CERT` / `TLS_KEY` (paths to a PEM certificate chain and key; both or neither), and
+`HANDOFF_RATE_PER_HOUR` (the most handoffs one member may send in any hour; a whole number from 1 to 10000;
+default `30`). An invalid value SHALL stop the server at startup with a message naming the variable. The
+certificate is read at startup; replacing it takes effect on restart.
 
 #### Scenario: Only one TLS variable
 - **WHEN** `TLS_CERT` is set and `TLS_KEY` is not
@@ -26,6 +27,10 @@ takes effect on restart.
 #### Scenario: Public address not wss
 - **WHEN** `PUBLIC_URL` is `http://team.example.com`
 - **THEN** the server refuses to start, saying the address must start with `wss://`
+
+#### Scenario: Invalid rate
+- **WHEN** `HANDOFF_RATE_PER_HOUR` is `0` or `many`
+- **THEN** the server refuses to start and names `HANDOFF_RATE_PER_HOUR`
 
 ### Requirement: TLS served directly or by a terminator
 

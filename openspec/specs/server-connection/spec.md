@@ -41,8 +41,8 @@ versions can add optional fields without breaking older peers.
   connection open
 
 #### Scenario: Unknown operation
-- **WHEN** an authenticated client sends `{"t":"req","id":7,"m":"handoff.send","p":{}}` to a server of this
-  change
+- **WHEN** an authenticated client sends `{"t":"req","id":7,"m":"presence.set","p":{}}` to a server that does
+  not have that operation
 - **THEN** the server answers id 7 with `UNKNOWN_OPERATION` and the connection stays open
 
 #### Scenario: Unknown field
@@ -175,7 +175,7 @@ learning it from `UNKNOWN_OPERATION`.
 
 #### Scenario: Operations of this change
 - **WHEN** a device authenticates with a server of this change
-- **THEN** `operations` is exactly `["device.leave", "device.rename"]`
+- **THEN** `operations` is exactly `["device.leave", "device.rename", "handoff.received", "handoff.send", "team.members"]`
 
 ### Requirement: Renaming this device
 
@@ -224,11 +224,17 @@ that has not answered the previous ping by the time the next one is due.
 ### Requirement: The protocol document is the contract
 
 `docs/protocol.md` SHALL describe the invite link, the transport and certificate pinning, the frames, every
-operation the server accepts with its parameters and result, every error code with its `detail` fields, every
-close code with what the client should do on it, and how to recover when a join's answer is lost, so that a
-client can be built from it alone. A test SHALL fail when the operations, the error codes or the close codes
-listed in the document differ from those the server defines.
+operation the server accepts with its parameters and result, every event the server sends with its data,
+every error code with its `detail` fields, every close code with what the client should do on it, how to
+recover when a join's answer is lost, and the rules a client follows to receive handoffs (requirement
+"Receiving rules for clients" of `handoff-delivery`), so that a client can be built from it alone. A test SHALL fail when the
+operations, the event kinds, the error codes or the close codes listed in the document differ from those the
+server defines.
 
 #### Scenario: Undocumented operation
 - **WHEN** an operation is added to the server but not to `docs/protocol.md`
 - **THEN** the test suite fails, naming the operation
+
+#### Scenario: Undocumented event
+- **WHEN** an event kind is added to the server but not to `docs/protocol.md`
+- **THEN** the test suite fails, naming the event kind
