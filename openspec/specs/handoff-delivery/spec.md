@@ -118,7 +118,9 @@ connections the server SHALL choose the one that became ready most recently. It 
   device** replaced it, the handoff waits for that newer connection to become ready.
 
 A handoff SHALL NOT be offered twice on the same connection. While the server is shutting down it SHALL offer
-nothing.
+nothing. Before offering on a connection, the server SHALL check that its device is still not revoked; if it is,
+it SHALL NOT offer there, SHALL close that connection with 4004, and SHALL offer to the member's next ready
+connection, if any.
 
 #### Scenario: Recipient connected
 - **WHEN** Sam's desktop is connected and Alex sends to `sam`
@@ -146,6 +148,11 @@ nothing.
 #### Scenario: Shutdown
 - **WHEN** the server shuts down while Sam's laptop holds an offer and the desktop is connected
 - **THEN** the desktop is not offered it before the connections close
+
+#### Scenario: Device revoked before the sweep noticed
+- **WHEN** the admin command line revoked Sam's laptop, the server has not yet closed its connection, and Alex
+  sends to `sam` while Sam's desktop is also connected
+- **THEN** the laptop receives no `handoff.incoming` and is closed with 4004, and the desktop receives the event
 
 ### Requirement: Acknowledging delivery
 
@@ -196,8 +203,9 @@ SHALL be answered `HANDOFF_UNKNOWN`. A delivered handoff SHALL never be offered 
 - on `HANDOFF_UNKNOWN` for a handoff it stored (the server lost it, for example after being restored from a
   backup), or when the server's `operations` no longer list `handoff.received`, show it: the stored copy is the
   only one left;
-- when it discards its credential (close 4004, or `AUTH_FAILED`), remove the handoffs it stored but never had
-  acknowledged;
+- when it discards its credential (close 4004, or `AUTH_FAILED`), **show** the handoffs it stored but never had
+  answered, marked as possibly also delivered to another device: the acknowledgement may have reached the
+  server, which then counts the handoff as delivered here, and deleting it would lose it;
 - when it cannot store an incoming handoff now (for example its inbox is full), keep the offer in memory and
   store and acknowledge it when it can; the handoff stays with this connection until then;
 - keep a sent handoff's `clientId` until the send is answered, and resend with the same `clientId` after a lost
@@ -206,6 +214,12 @@ SHALL be answered `HANDOFF_UNKNOWN`. A delivered handoff SHALL never be offered 
 #### Scenario: Rules documented
 - **WHEN** a client developer reads `docs/protocol.md`
 - **THEN** each rule above is stated with the error codes it reacts to
+
+#### Scenario: Credential discarded with an unanswered acknowledgement
+- **WHEN** a device stored a handoff and sent `handoff.received`, the answer was lost, and the device is then
+  revoked while offline
+- **THEN** per the documented rule the device shows the handoff, marked as possibly delivered elsewhere,
+  instead of deleting it
 
 ### Requirement: Expiry
 
