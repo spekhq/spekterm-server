@@ -169,7 +169,8 @@ sent what**. It therefore sees:
 
 - the team directory and presence,
 - each handoff's sender, recipient, times and status,
-- **each handoff's title, body and report**, in v1 (see §13, end-to-end encryption).
+- **each handoff's title, body and report**, in v1: there is no end-to-end encryption (§13.1). The setup
+  guide says so, so that every member knows the operator can read them.
 
 It is **not** trusted to make anyone's spekterm do anything else. The only effects a server can cause on a
 desktop are: an item appears in the inbox, a sent handoff's status changes, the directory and presence
@@ -261,6 +262,10 @@ The protocol keeps room for **additional channel types** on the same connection.
 relay for the phone's remote access (the phone's TLS to the desktop tunneled through the server, still
 pinned to the desktop), for a later version.
 
+It also keeps room for **end-to-end encryption**: a handoff's title, body and report travel as one payload
+with an encryption marker, which v1 always sets to "not encrypted". Adding encryption later is a new marker
+value, not a new message format.
+
 ## 9. Operating the server
 
 - **One container**, one data directory (SQLite), one port. Node 22, matching spekterm's toolchain.
@@ -323,14 +328,10 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 
 ## 13. Open questions
 
-1. **End-to-end encryption.** v1 as drafted lets the server operator read handoff bodies. Since the operator
-   is the team itself, this may be acceptable; encrypting to the recipient's devices removes it but needs key
-   distribution across a member's several devices. **Decide before M0**: `docs/protocol.md` is written in
-   M0, and encryption changes the message format.
-2. **How the sender's agent learns the outcome later.** A receipt covers the send; does the sending session
+1. **How the sender's agent learns the outcome later.** A receipt covers the send; does the sending session
    also hear about `taken` and `done` (for example through its relations file), or only the user? Decide in
    M2, which delivers those statuses.
-3. **Repository name.** `spekterm-server`, under `spekhq`.
+2. **Repository name.** `spekterm-server`, under `spekhq`.
 
 ### 13.1 Decided (2026-11-03)
 
@@ -341,3 +342,9 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 - **A handoff is delivered to one of the recipient's devices** (§8.3), accepted as a trade-off: it may land
   on a machine the recipient is not using at the moment.
 - **A teammate handoff has the same body limit as a same-machine handoff** (§7.2).
+- **No end-to-end encryption in v1**; the protocol reserves room for it (§8.4). The operator is the team
+  itself and bodies are deleted after retention, so the threat is small. Encryption that actually holds
+  against a dishonest server needs key verification between people and handling for each member's several
+  devices (adding, revoking), which is about a milestone of its own; without verification it would only look
+  safe. It would also stop the server from checking the body limit (§7.2). Revisit if teams want to run the
+  server on a machine they do not trust, or to share one server between teams.
