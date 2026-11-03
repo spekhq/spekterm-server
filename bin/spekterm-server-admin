@@ -1,0 +1,4 @@
+#!/bin/sh
+# spekterm-server-admin: the team's management command line (docs/self-hosting.md).
+here=$(dirname "$(readlink -f "$0")")
+exec node --disable-warning=ExperimentalWarning "$here/../src/admin.ts" "$@"

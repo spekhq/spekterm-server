@@ -107,7 +107,7 @@ thing: **free, self-hosted, between different people**, which nothing else cover
 |---|---|
 | **Team** | The people who share one server. v1: one server serves one team. |
 | **Member** | A person on the team, with a display name and a handle unique within the team. |
-| **Admin** | A member who can create invites and remove members. The first member is the admin. |
+| **Admin** | Whoever can run the server's admin command line: creates invites, removes members (§13.1). |
 | **Device** | One spekterm installation signed in as a member. A member may have several (work laptop, home desktop). |
 | **Invite** | A single-use link that lets one person join the team. It expires. |
 | **Handoff** | A title and a body, written by the sender's agent and confirmed by the sender, addressed to one member. |
@@ -348,3 +348,10 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
   devices (adding, revoking), which is about a milestone of its own; without verification it would only look
   safe. It would also stop the server from checking the body limit (§7.2). Revisit if teams want to run the
   server on a machine they do not trust, or to share one server between teams.
+- **The admin is whoever runs the admin command line** in v1. There is no admin operation over the
+  connection, so no member carries an admin flag; access to the container is the control. A later version
+  that adds admin operations to spekterm adds the flag then (server-foundation, design D9).
+- **Leaving from a member's last device leaves the team**: the member is removed, the handle freed and their
+  device invites cancelled, so "leave the team" in Settings (§10) means what it says and no member without
+  devices keeps receiving handoffs. The admin revoking a device does not remove the member, so a lost
+  machine can be replaced with a device invite (server-foundation, design D10).

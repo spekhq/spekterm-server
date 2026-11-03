@@ -1,0 +1,9 @@
+node_modules
+data
+test
+openspec
+.claude
+.git
+docs
+*.md
+!README.md
