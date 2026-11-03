@@ -3,7 +3,8 @@
 One container, one data directory, one port. The server accepts connections and makes none of its own.
 
 **Before you start: whoever runs the server can read everything that passes through it**, including the text of
-every handoff between teammates. There is no end-to-end encryption. Run it on a machine the whole team trusts.
+every handoff between teammates while it waits to be delivered. There is no end-to-end encryption. Run it on a
+machine the whole team trusts.
 
 ## 1. Build and run
 
@@ -22,6 +23,7 @@ docker run -d --name spekterm-server --restart unless-stopped \
 | `PORT` | The port inside the container. Default `8080`. |
 | `DATA_DIR` | Where the database lives. Default `/data` (the volume). |
 | `TLS_CERT`, `TLS_KEY` | PEM certificate chain and key, if the server serves TLS itself (section 2b). Both or neither. |
+| `HANDOFF_RATE_PER_HOUR` | The most handoffs one member may send in any hour, across their devices. Default `30` (1–10000). Stops a looping agent from flooding a teammate. |
 
 spekterm only connects over `wss://`, so the server needs TLS one way or the other.
 
@@ -88,7 +90,15 @@ they need a new member invite.
 device never got its credential. Find the device in `member list` (recent "joined", no later "last seen"),
 `device revoke` it, and send a new invite (`--member` if the member exists).
 
-## 5. Backups and upgrades
+## 5. What the server keeps
+
+A handoff's title and body stay in the database only while it waits for the recipient: at most 30 days, or
+until the recipient is removed. Once it is delivered or expires they are deleted, and within a minute they are
+gone from the files in the data directory (deleted space is zeroed and the write-ahead log truncated; a backup
+copy you took earlier still has them). What stays is who sent what to whom and when, its status, and an unsalted
+hash of the request used to recognise a resend.
+
+## 6. Backups and upgrades
 
 The whole state is the SQLite database in the volume. To back up, stop the container and copy the volume's
 contents. A newer server upgrades the database at startup; an older server refuses to start on a database a

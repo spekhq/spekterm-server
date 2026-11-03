@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { ConfigError, loadConfig } from '../src/config.ts'
 
 test('defaults', () => {
-  assert.deepEqual(loadConfig({}), { port: 8080, dataDir: '/data', publicUrl: null, tls: null })
+  assert.deepEqual(loadConfig({}), { port: 8080, dataDir: '/data', publicUrl: null, tls: null, handoffRatePerHour: 30 })
 })
 
 test('all variables', () => {
@@ -13,12 +13,14 @@ test('all variables', () => {
     PUBLIC_URL: 'wss://team.example.com:8443/',
     TLS_CERT: '/c.pem',
     TLS_KEY: '/k.pem',
+    HANDOFF_RATE_PER_HOUR: '120',
   })
   assert.deepEqual(config, {
     port: 9000,
     dataDir: '/srv/team',
     publicUrl: 'wss://team.example.com:8443',
     tls: { certPath: '/c.pem', keyPath: '/k.pem' },
+    handoffRatePerHour: 120,
   })
 })
 
@@ -43,4 +45,11 @@ test('trailing slash is dropped', () => {
 test('invalid port', () => {
   assert.throws(() => loadConfig({ PORT: 'eighty' }), (e: unknown) => e instanceof ConfigError && e.variable === 'PORT')
   assert.throws(() => loadConfig({ PORT: '70000' }), (e: unknown) => e instanceof ConfigError && e.variable === 'PORT')
+})
+
+test('invalid handoff rate names the variable', () => {
+  for (const bad of ['0', 'many', '10001', '-1', '1.5']) {
+    assert.throws(() => loadConfig({ HANDOFF_RATE_PER_HOUR: bad }), (e: unknown) => e instanceof ConfigError && e.variable === 'HANDOFF_RATE_PER_HOUR')
+  }
+  assert.equal(loadConfig({ HANDOFF_RATE_PER_HOUR: '10000' }).handoffRatePerHour, 10000)
 })

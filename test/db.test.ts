@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { spawn } from 'node:child_process'
-import { DATABASE_FILE, SCHEMA_VERSION, SchemaTooNewError, openDataDir, openDatabaseFile, writeTransaction } from '../src/db.ts'
+import { DATABASE_FILE, MIGRATIONS, SCHEMA_VERSION, SchemaTooNewError, openDataDir, openDatabaseFile, writeTransaction } from '../src/db.ts'
 
 function tempDir(t: { after: (fn: () => void) => void }): string {
   const dir = mkdtempSync(join(tmpdir(), 'spekterm-server-db-'))
@@ -86,5 +86,25 @@ test('writeTransaction commits, and rolls back on throw', (t) => {
   )
   assert.equal((db.prepare('SELECT name FROM team').get() as { name: string }).name, 'A')
   assert.equal(db.isTransaction, false)
+  db.close()
+})
+
+test('a version-1 database is upgraded in place, keeping its members', (t) => {
+  const path = join(tempDir(t), DATABASE_FILE)
+  const raw = new DatabaseSync(path)
+  raw.exec(MIGRATIONS[0]!)
+  raw.exec("PRAGMA user_version = 1; INSERT INTO members (id, handle, display_name, created_at) VALUES ('m_1', 'sam', 'Sam', 1)")
+  raw.close()
+  const db = openDatabaseFile(path)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
+  assert.equal(SCHEMA_VERSION, 2)
+  assert.equal((db.prepare('SELECT handle FROM members').get() as { handle: string }).handle, 'sam')
+  assert.equal((db.prepare('SELECT count(*) AS n FROM handoffs').get() as { n: number }).n, 0)
+  db.close()
+})
+
+test('secure_delete is on', (t) => {
+  const db = openDataDir(tempDir(t))
+  assert.equal((db.prepare('PRAGMA secure_delete').get() as { secure_delete: number }).secure_delete, 1)
   db.close()
 })

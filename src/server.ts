@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { type Config, ConfigError, loadConfig } from './config.ts'
 import { Connection, type ConnectionHost, DEFAULT_TIMINGS, type Timings } from './connection.ts'
-import { type Database, openDataDir } from './db.ts'
+import { type Database, openDataDir, truncateWal } from './db.ts'
+import { Delivery } from './delivery.ts'
+import { expireOverdue } from './handoffs.ts'
 import { CLOSE_CODES, MAX_FRAME_BYTES } from './protocol.ts'
 import { type Clock, getTeamName, revokedAmong } from './team.ts'
 import { type TlsMaterial, loadTls } from './tls.ts'
@@ -24,6 +26,10 @@ export interface ServerOptions {
   timings?: Partial<Timings>
   /** How often to look for devices revoked by another process. */
   sweepIntervalMs?: number
+  /** How often to expire overdue handoffs and truncate the write-ahead log. */
+  maintenanceIntervalMs?: number
+  /** The most handoffs one member may send in any hour. */
+  handoffRatePerHour?: number
   /** The `/healthz` check; throws when unhealthy. Defaults to a read of the team table. */
   healthCheck?: () => void
   log?: (message: string) => void
@@ -33,6 +39,9 @@ export interface RunningServer {
   readonly port: number
   /** Live connections of authenticated devices, by device id. */
   readonly devices: ReadonlyMap<string, Connection>
+  readonly delivery: Delivery
+  /** Runs the maintenance step now: expire overdue handoffs, truncate the write-ahead log. */
+  maintain(): { expired: string[]; truncated: boolean }
   /** Stops accepting, closes every connection with 1001, and closes the database. */
   close(): Promise<void>
 }
@@ -47,7 +56,9 @@ export async function startServer(port: number, options: ServerOptions): Promise
   const log = options.log ?? defaultLog
   const timings: Timings = { ...DEFAULT_TIMINGS, ...options.timings }
   const sweepIntervalMs = options.sweepIntervalMs ?? 5_000
+  const maintenanceIntervalMs = options.maintenanceIntervalMs ?? 60_000
   const healthCheck = options.healthCheck ?? (() => void getTeamName(db))
+  const delivery = new Delivery(db, now, log)
 
   const devices = new Map<string, Connection>()
   const connections = new Set<Connection>()
@@ -64,8 +75,19 @@ export async function startServer(port: number, options: ServerOptions): Promise
         older.close(CLOSE_CODES.REPLACED, 'replaced by a newer connection of this device')
       }
     },
-    unregister(deviceId, connection) {
+    unregister(deviceId, connection, reason) {
       if (devices.get(deviceId) === connection) devices.delete(deviceId)
+      delivery.onClosed(connection, reason)
+    },
+    ready(connection) {
+      delivery.onReady(connection)
+    },
+    handoffRatePerHour: options.handoffRatePerHour ?? 30,
+    handoffSent(handoffId, recipientMemberId) {
+      delivery.onSent(handoffId, recipientMemberId)
+    },
+    handoffAcknowledged(handoffId) {
+      delivery.onAcknowledged(handoffId)
     },
   }
 
@@ -121,6 +143,20 @@ export async function startServer(port: number, options: ServerOptions): Promise
     }
   }, sweepIntervalMs)
 
+  // Expire overdue handoffs, then truncate the WAL so cleared text leaves the files (design D7).
+  const maintain = () => {
+    let expired: string[] = []
+    try {
+      expired = expireOverdue(db, now)
+      for (const id of expired) log(`handoff ${id} expired`)
+    } catch (error) {
+      log(`expiring handoffs failed: ${(error as Error).message}`)
+    }
+    const truncated = truncateWal(db)
+    return { expired, truncated }
+  }
+  const maintenance = setInterval(maintain, maintenanceIntervalMs)
+
   await new Promise<void>((resolve, reject) => {
     http.once('error', reject)
     http.listen(port, () => {
@@ -133,9 +169,13 @@ export async function startServer(port: number, options: ServerOptions): Promise
   return {
     port: (http.address() as AddressInfo).port,
     devices,
+    delivery,
+    maintain,
     close() {
       closing ??= (async () => {
+        delivery.closing = true
         clearInterval(sweep)
+        clearInterval(maintenance)
         const closed = new Promise<void>((resolve) => http.close(() => resolve()))
         for (const connection of connections) connection.close(CLOSE_CODES.GOING_AWAY, 'server shutting down')
         // Give peers a moment to complete the closing handshake, then drop whatever is left.
@@ -170,7 +210,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     process.stderr.write(`spekterm-server: ${(error as Error).message}\n`)
     process.exit(1)
   }
-  const server = await startServer(config.port, { db, tls })
+  const server = await startServer(config.port, { db, tls, handoffRatePerHour: config.handoffRatePerHour })
   if (tls === null) {
     defaultLog(`listening on port ${server.port} without TLS; a TLS terminator (reverse proxy) is expected in front`)
   } else {

@@ -2,8 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { ERROR_CODES } from '../src/errors.ts'
-import { CLOSE_CODES, OPERATIONS } from '../src/protocol.ts'
+import { ERROR_CODES, PRE_AUTH_ERROR_CODES } from '../src/errors.ts'
+import { CLOSE_CODES, EVENT_KINDS, OPERATIONS } from '../src/protocol.ts'
 
 const DOC = readFileSync(new URL('../docs/protocol.md', import.meta.url), 'utf8')
 
@@ -40,9 +40,14 @@ test('close codes: document and server agree', () => {
   diff('close codes', documented, Object.values(CLOSE_CODES))
 })
 
+test('event kinds: document and server agree', () => {
+  const documented = [...section('## 10. Events').matchAll(/^### `([^`]+)`$/gm)].map((m) => m[1]!)
+  diff('event kinds', documented, EVENT_KINDS)
+})
+
 test('every pre-authentication error has a client action', () => {
   const table = section('## 4. Before authentication')
-  for (const code of ERROR_CODES.filter((c) => c !== 'ALREADY_AUTHENTICATED')) {
+  for (const code of PRE_AUTH_ERROR_CODES) {
     assert.match(table, new RegExp(`^\\|[^\\n]*\`${code}\``, 'm'), `no client action for ${code}`)
   }
 })

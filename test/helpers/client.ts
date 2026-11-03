@@ -2,6 +2,12 @@
 import { WebSocket } from 'ws'
 import { once } from 'node:events'
 
+export interface Event {
+  t: 'evt'
+  k: string
+  d: any
+}
+
 export interface Answer {
   t: 'res'
   id: number | string | null
@@ -12,7 +18,11 @@ export interface Answer {
 
 export class TestClient {
   readonly ws: WebSocket
+  /** Answers only (kept for existing tests). */
   readonly answers: Answer[] = []
+  /** Answers and events, in arrival order. */
+  readonly frames: Array<Answer | Event> = []
+  #eventWaiters: Array<{ kind: string; resolve: (e: Event) => void }> = []
   readonly closed: Promise<{ code: number; reason: string }>
   #nextId = 1
   #waiters = new Map<number | string | null, (a: Answer) => void>()
@@ -21,7 +31,17 @@ export class TestClient {
     this.ws = new WebSocket(url, options)
     this.ws.on('error', () => {})
     this.ws.on('message', (data) => {
-      const answer = JSON.parse(String(data)) as Answer
+      const frame = JSON.parse(String(data)) as Answer | Event
+      this.frames.push(frame)
+      if (frame.t === 'evt') {
+        const waiter = this.#eventWaiters.find((w) => w.kind === frame.k)
+        if (waiter !== undefined) {
+          this.#eventWaiters.splice(this.#eventWaiters.indexOf(waiter), 1)
+          waiter.resolve(frame)
+        }
+        return
+      }
+      const answer = frame
       this.answers.push(answer)
       const waiter = this.#waiters.get(answer.id)
       if (waiter !== undefined) {
@@ -57,6 +77,31 @@ export class TestClient {
 
   answerTo(id: number | string | null): Promise<Answer> {
     return new Promise((resolve) => this.#waiters.set(id, resolve))
+  }
+
+  /** Events of a kind received so far. */
+  events(kind: string): Event[] {
+    return this.frames.filter((f): f is Event => f.t === 'evt' && f.k === kind)
+  }
+
+  /** The next event of a kind that has not been returned by an earlier call; resolves at once if one waits. */
+  #consumed = new Map<string, number>()
+  nextEvent(kind: string, timeoutMs = 2000): Promise<Event> {
+    const used = this.#consumed.get(kind) ?? 0
+    const already = this.events(kind)[used]
+    this.#consumed.set(kind, used + 1)
+    if (already !== undefined) return Promise.resolve(already)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no ${kind} event within ${timeoutMs} ms`)), timeoutMs)
+      this.#eventWaiters.push({ kind, resolve: (e) => (clearTimeout(timer), resolve(e)) })
+    })
+  }
+
+  /** Resolves false if an event of the kind arrives within the time, true otherwise. */
+  async noEvent(kind: string, ms = 300): Promise<boolean> {
+    const before = this.events(kind).length
+    await new Promise((resolve) => setTimeout(resolve, ms))
+    return this.events(kind).length === before
   }
 
   close(): void {

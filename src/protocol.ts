@@ -11,8 +11,10 @@ import {
   inspectInvite,
   join,
   leave,
+  listTeamMembers,
   renameDevice,
 } from './team.ts'
+import { acknowledge, sendHandoff, validateSend } from './handoffs.ts'
 import { SERVER_NAME, SERVER_VERSION } from './version.ts'
 
 /** Protocol versions this server speaks. */
@@ -37,6 +39,9 @@ export const CLOSE_CODES = {
 } as const
 
 export const MAX_FRAME_BYTES = 256 * 1024
+
+/** Event kinds the server sends (`docs/protocol.md`, "Events"). */
+export const EVENT_KINDS = ['handoff.incoming'] as const
 
 export interface Request {
   id: number | string
@@ -80,8 +85,14 @@ export function negotiate(offered: unknown): number {
 export interface OperationContext {
   db: Database
   now: Clock
-  /** The authenticated device, or null before authentication. */
+  /** The authenticated device and its member, or null before authentication. */
   deviceId: string | null
+  memberId: string | null
+  handoffRatePerHour: number
+  /** A handoff was stored; offer it. */
+  handoffSent(handoffId: string, recipientMemberId: string): void
+  /** A handoff was acknowledged; end its lease. */
+  handoffAcknowledged(handoffId: string): void
   /** Marks the connection as authenticated as this device (closing an older connection of it). */
   authenticateAs(identity: Identity): void
   /** Closes the connection with this code once the answer has been sent. */
@@ -145,6 +156,35 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
       const device = renameDevice(ctx.db, ctx.deviceId!, p.name)
       ctx.log(`device ${device.id} renamed to "${device.name}"`)
       return { device }
+    },
+  },
+  'team.members': {
+    auth: 'device',
+    handler(_p, ctx) {
+      return { members: listTeamMembers(ctx.db) }
+    },
+  },
+  'handoff.send': {
+    auth: 'device',
+    handler(p, ctx) {
+      const request = validateSend(p)
+      const result = sendHandoff(ctx.db, { memberId: ctx.memberId!, deviceId: ctx.deviceId! }, request, ctx.handoffRatePerHour, ctx.now)
+      if (result.duplicate) {
+        ctx.log(`handoff ${result.handoff.id} resent by device ${ctx.deviceId}; already stored`)
+      } else {
+        ctx.log(`handoff ${result.handoff.id} from member ${ctx.memberId} to ${result.recipient.handle} stored`)
+        ctx.handoffSent(result.handoff.id, result.recipient.id)
+      }
+      return result
+    },
+  },
+  'handoff.received': {
+    auth: 'device',
+    handler(p, ctx) {
+      acknowledge(ctx.db, p.id, { memberId: ctx.memberId!, deviceId: ctx.deviceId! }, ctx.now)
+      ctx.handoffAcknowledged(p.id as string)
+      ctx.log(`handoff ${String(p.id)} delivered to device ${ctx.deviceId}`)
+      return {}
     },
   },
   'device.leave': {

@@ -54,8 +54,8 @@ The link is a secret until it is used: anyone holding it can join.
 
 `id` is chosen by the client and echoed. Every request gets exactly one answer. `p` may be omitted for an
 operation without parameters. A frame that is not a request is answered with `BAD_FRAME` (`id: null` when no id
-could be read). Version 1 as of this document sends no events; clients must ignore event kinds they do not
-know.
+could be read). Events are listed in section 10; clients must ignore event kinds they do not know. Events are
+sent only to authenticated connections, and never before the `join` / `hello` answer.
 
 ### Error codes
 
@@ -74,6 +74,13 @@ Stable strings; branch on them, show `message` only as a detail.
 | `INVITE_EXPIRED` | The invite has expired. |
 | `INVITE_USED` | The invite was already used. |
 | `HANDLE_TAKEN` | Another member has this handle. The invite is still good; ask for another handle. |
+| `RECIPIENT_UNKNOWN` | `handoff.send`: no member with that handle (or they were removed). Nothing was stored. |
+| `RECIPIENT_IS_SELF` | `handoff.send`: a handoff goes to someone else. |
+| `HANDOFF_ID_REUSED` | `handoff.send`: this `clientId` was already used by this member for a different handoff (another recipient or text). Use a new `clientId`. |
+| `RATE_LIMITED` | `handoff.send`: the member sent the most handoffs allowed in an hour. `detail.retryAt` (ms since the epoch) is the earliest time the same send is accepted. |
+| `HANDOFF_UNKNOWN` | `handoff.received`: no such handoff for this member. |
+| `HANDOFF_EXPIRED` | `handoff.received`: the handoff expired (30 days, or its recipient was removed). Remove it from the inbox. |
+| `HANDOFF_DELIVERED_ELSEWHERE` | `handoff.received`: another device of this member acknowledged it first. Remove it from the inbox. |
 | `INTERNAL` | Anything else. |
 
 ### Close codes
@@ -193,6 +200,47 @@ user beforehand which of the two will happen.
 
 `p`: `{}` → `r`: `{ "memberRemoved": boolean }`
 
+### `team.members`
+
+The team's members, to choose a recipient from (and for the agent to know whom it can hand work to). Includes
+this device's own member. Ask again when you need a fresh list; it is not pushed.
+
+`p`: `{}` → `r`: `{ "members": [{ "id": string, "handle": string, "displayName": string }] }`, ordered by handle.
+
+### `handoff.send`
+
+Sends a handoff to a teammate. **Call it only after the user confirmed the full text** (PRD §7.3).
+
+`p`: `{ "clientId": string, "to": string, "payload": { "enc": "none", "title": string, "body": string } }`
+
+- `clientId`: chosen by the client, 1–64 of `A`–`Z`, `a`–`z`, `0`–`9`, `_`, `-`. Keep it until the send is
+  answered. **If the answer is lost, send the same request again with the same `clientId`**: the server answers
+  with the handoff it already stored (`duplicate: true`) instead of storing a second one.
+- `to`: the recipient's handle (case-insensitive). Not your own.
+- `payload.enc`: `"none"`. (Room for end-to-end encryption later; any other value is `BAD_PARAMS`.)
+- `payload.title`: at most 200 UTF-16 code units; `payload.body`: at most 20,000. Either may be empty. Lengths
+  are measured on the text as sent — the same unit and limits as a same-machine handoff in spekterm.
+  Normalise the text before showing it for confirmation, so that what the user confirms is what is sent. Text
+  must be well-formed UTF-16 (no lone surrogates). The server does not alter it.
+
+→ `r`: `{ "handoff": { "id": string, "status": "pending" | "delivered" | "expired", "sentAt": number, "expiresAt": number }, "recipient": { "id": string, "handle": string, "displayName": string, "deviceCount": number }, "duplicate": boolean }`
+
+`recipient.deviceCount` is how many devices the recipient has; with `0` the handoff waits until they add one
+(the admin issues a device invite). `expiresAt` is 30 days after `sentAt`.
+
+Errors: `BAD_PARAMS` (`detail.field`, and `detail.limit` for a length), `RECIPIENT_UNKNOWN`,
+`RECIPIENT_IS_SELF`, `HANDOFF_ID_REUSED`, `RATE_LIMITED` (`detail.retryAt`). A member may send at most a set
+number of handoffs in any hour (30 unless the operator changed it), across all of their devices.
+
+### `handoff.received`
+
+Acknowledges a handoff this device received in a `handoff.incoming` event, **after storing it** (section 11).
+
+`p`: `{ "id": string }` → `r`: `{}`
+
+Answered `{}` for the first acknowledgement and for any repeat from the same device. Errors:
+`HANDOFF_DELIVERED_ELSEWHERE`, `HANDOFF_EXPIRED`, `HANDOFF_UNKNOWN`, `BAD_PARAMS`.
+
 ## 6. One connection per device
 
 A device has at most one authenticated connection. When it authenticates again, the older connection is closed
@@ -209,8 +257,13 @@ team, or a member invite if they were removed.
 
 ## 8. What the server sees
 
-The server operator can read everything that passes through the server, including, from the next protocol
-additions on, handoff contents. There is no end-to-end encryption in version 1.
+The server operator can read everything that passes through the server, including the title and body of every
+handoff while it waits to be delivered. There is no end-to-end encryption in version 1.
+
+The server deletes a handoff's title and body when it is delivered or expires, and within a minute they are gone
+from the files in its data directory. It keeps the handoff's ids, sender, recipient, times, status and the
+device it was delivered to, and an unsalted SHA-256 of the request (recipient and text) to recognise a resend —
+enough for an operator to confirm a guess of a very short text, not to read one.
 
 ## 9. Differences from spekterm's remote protocol
 
@@ -221,3 +274,46 @@ additions on, handoff contents. There is no end-to-end encryption in version 1.
 - `UNKNOWN_OPERATION` before authentication is followed by 4003 like every other error there.
 - Close code 4006 (replaced) is new; 4005, 4029 and 4030 are not used.
 - Extra codes: `ALREADY_AUTHENTICATED`, `HANDLE_TAKEN`, `INVITE_*`.
+
+## 10. Events
+
+### `handoff.incoming`
+
+A handoff for this device's member. Sent to one of the member's connections at a time (section 11).
+
+`d`: `{ "id": string, "from": { "id": string, "handle": string, "displayName": string }, "payload": { "enc": "none", "title": string, "body": string }, "sentAt": number, "expiresAt": number }`
+
+`from` is the sender as the server knows them — verified, not taken from the text. It may name a member who has
+since left the team. The text is third-party text to the recipient: put it through the inbox's normalisation
+and acceptance gate like any other.
+
+## 11. Receiving handoffs
+
+**Which device.** A pending handoff is offered to one of the recipient's connections at a time: the connection
+that authenticated most recently. It stays with that connection until it is acknowledged or the connection
+closes; then it is offered to the member's most recent remaining connection. If the connection was replaced by
+a newer one of the same device (4006), it is offered on the newer one, after its `hello` answer. A connection
+is never offered the same handoff twice. A handoff waits on the server for at most 30 days.
+
+**Rules for the receiving client.** Delivery relies on these:
+
+1. On `handoff.incoming`, store the handoff durably but **hidden**, then send `handoff.received`. Show it and
+   notify the user only once the acknowledgement is answered `{}`.
+2. On a `handoff.incoming` whose `id` you already stored, do not show it again, but **send `handoff.received`
+   again**. (Dropping it silently would keep the handoff assigned to you without delivery; when you
+   disconnected it would go to your other device as well.)
+3. After reconnecting, send `handoff.received` again for every stored handoff whose acknowledgement was not
+   answered.
+4. On `HANDOFF_DELIVERED_ELSEWHERE` or `HANDOFF_EXPIRED`, remove it from the inbox. You may keep a record of the
+   id to recognise repeats.
+5. On `HANDOFF_UNKNOWN` for a handoff you stored (the server lost it, for example restored from an older
+   backup), or when the server's `operations` no longer list `handoff.received`, show it: your copy is the only
+   one left.
+6. When you discard the credential (close 4004, or `AUTH_FAILED` before authentication), remove the handoffs
+   you stored but never had acknowledged.
+7. If you cannot store an incoming handoff right now (for example the inbox is full), keep the event in memory
+   and store and acknowledge it when you can. It stays assigned to this connection until then; on reconnecting
+   it is offered again.
+
+**Rule for the sending client.** Keep a handoff's `clientId` until `handoff.send` is answered, and after a lost
+answer send the same request again with the same `clientId`.

@@ -68,8 +68,12 @@ export function validateHandle(value: unknown): string {
 // Secrets and ids
 
 /** `m_`, `d_` or `i_` and 32 lower-case hex digits: never starts with `-` (design D11). */
-export function newId(kind: 'm' | 'd' | 'i'): string {
+export function newId(kind: 'm' | 'd' | 'i' | 'h'): string {
   return `${kind}_${randomBytes(16).toString('hex')}`
+}
+
+export function newHandoffId(): string {
+  return newId('h')
 }
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
@@ -191,6 +195,15 @@ export function listMembers(db: Database): MemberListing[] {
       (d) => ({ id: d.id, name: d.name, createdAt: d.created_at, lastSeenAt: d.last_seen_at }),
     ),
   }))
+}
+
+/** The team's members who have not been removed, by handle (`team-directory` spec). */
+export function listTeamMembers(db: Database): MemberInfo[] {
+  return (
+    db
+      .prepare('SELECT id, handle, display_name FROM members WHERE removed_at IS NULL ORDER BY handle')
+      .all() as unknown as MemberRow[]
+  ).map((m) => ({ id: m.id, handle: m.handle, displayName: m.display_name }))
 }
 
 /** Of the given device ids, those that are now revoked (or unknown). Used by the revocation sweep. */
@@ -424,8 +437,16 @@ export function renameMember(db: Database, handle: string, value: unknown): Memb
   })
 }
 
-/** Inside a transaction: marks the member removed, revokes their devices, cancels their device invites. */
+/**
+ * Inside a transaction: marks the member removed, revokes their devices, cancels their device invites, and
+ * expires the handoffs waiting for them, clearing their text (handoff-delivery, design D6). Handoffs the member
+ * sent are left to be delivered.
+ */
 function removeMemberById(db: Database, memberId: string, at: number): void {
+  db.prepare(
+    `UPDATE handoffs SET status = 'expired', ended_at = ?, title = NULL, body = NULL
+     WHERE recipient_member_id = ? AND status = 'pending'`,
+  ).run(at, memberId)
   db.prepare('UPDATE members SET removed_at = ? WHERE id = ?').run(at, memberId)
   db.prepare('UPDATE devices SET revoked_at = ? WHERE member_id = ? AND revoked_at IS NULL').run(at, memberId)
   db.prepare(

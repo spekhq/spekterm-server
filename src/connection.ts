@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws'
 import type { Database } from './db.ts'
 import { type ErrorCode, ProtocolError } from './errors.ts'
 import { CLOSE_CODES, OPERATIONS, type OperationContext, parseFrame } from './protocol.ts'
+import type { CloseReason, DeliveryTarget } from './delivery.ts'
 import { type Clock, type Identity, touchDevice } from './team.ts'
 
 export interface Timings {
@@ -34,16 +35,24 @@ export interface ConnectionHost {
   /** The connection authenticated as a device; the host closes any older connection of that device. */
   register(deviceId: string, connection: Connection): void
   /** The connection closed; the host forgets it if it is still the device's current connection. */
-  unregister(deviceId: string, connection: Connection): void
+  unregister(deviceId: string, connection: Connection, reason: CloseReason): void
+  /** The answer to the connection's successful join or hello has been sent. */
+  ready(connection: Connection): void
+  /** Settings and hooks operations use. */
+  handoffRatePerHour: number
+  handoffSent(handoffId: string, recipientMemberId: string): void
+  handoffAcknowledged(handoffId: string): void
 }
 
 type State = 'pending' | 'refusing' | 'authenticated' | 'closed'
 
-export class Connection {
+export class Connection implements DeliveryTarget {
   readonly #ws: WebSocket
   readonly #host: ConnectionHost
   #state: State = 'pending'
   #deviceId: string | null = null
+  #memberId: string | null = null
+  readonly offered = new Set<string>()
   #authTimer: NodeJS.Timeout | undefined
   #pingTimer: NodeJS.Timeout | undefined
   #refuseTimer: NodeJS.Timeout | undefined
@@ -65,24 +74,32 @@ export class Connection {
     return this.#deviceId
   }
 
+  get memberId(): string | null {
+    return this.#memberId
+  }
+
+  sendEvent(kind: string, data: unknown): void {
+    this.#send({ t: 'evt', k: kind, d: data })
+  }
+
   close(code: number, reason = ''): void {
     if (this.#state === 'closed') return
     this.#stopTimers()
     this.#ws.close(code, reason)
-    this.#markClosed()
+    this.#markClosed(code === CLOSE_CODES.REPLACED ? 'replaced' : 'other')
   }
 
   /** Ends the connection without a closing handshake (shutdown of a dead peer). */
   terminate(): void {
     this.#stopTimers()
     this.#ws.terminate()
-    this.#markClosed()
+    this.#markClosed('other')
   }
 
-  #markClosed(): void {
+  #markClosed(reason: CloseReason): void {
     if (this.#state === 'closed') return
     this.#state = 'closed'
-    if (this.#deviceId !== null) this.#host.unregister(this.#deviceId, this)
+    if (this.#deviceId !== null) this.#host.unregister(this.#deviceId, this, reason)
   }
 
   #stopTimers(): void {
@@ -93,7 +110,7 @@ export class Connection {
 
   #onClose(): void {
     this.#stopTimers()
-    this.#markClosed()
+    this.#markClosed('other')
   }
 
   #ping(): void {
@@ -163,10 +180,15 @@ export class Connection {
       return
     }
     let closeCode: number | null = null
+    const wasAuthenticated = this.#state === 'authenticated'
     const ctx: OperationContext = {
       db: this.#host.db,
       now: this.#host.now,
       deviceId: this.#deviceId,
+      memberId: this.#memberId,
+      handoffRatePerHour: this.#host.handoffRatePerHour,
+      handoffSent: (id, recipient) => this.#host.handoffSent(id, recipient),
+      handoffAcknowledged: (id) => this.#host.handoffAcknowledged(id),
       authenticateAs: (identity: Identity) => this.#authenticated(identity),
       closeAfterAnswer: (code) => {
         closeCode = code
@@ -186,6 +208,9 @@ export class Connection {
       return
     }
     this.#send({ t: 'res', id, ok: true, r: result })
+    // Ready only now, after the answer: events must not reach the device before its join / hello answer.
+    // Called unconditionally and synchronously, so no other connection can become ready in between.
+    if (!wasAuthenticated && this.#state === 'authenticated') this.#host.ready(this)
     if (closeCode !== null) this.close(closeCode)
   }
 
@@ -193,6 +218,7 @@ export class Connection {
     clearTimeout(this.#authTimer)
     this.#state = 'authenticated'
     this.#deviceId = identity.device.id
+    this.#memberId = identity.member.id
     this.#lastSeenWrite = this.#host.now()
     this.#host.register(identity.device.id, this)
   }

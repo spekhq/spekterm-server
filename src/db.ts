@@ -17,7 +17,7 @@ export const DATABASE_FILE = 'spekterm-server.db'
 const BUSY_TIMEOUT_MS = 5000
 
 /** Ordered schema migrations; index + 1 is the schema version each one produces. */
-const MIGRATIONS: readonly string[] = [
+export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE team (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -56,6 +56,29 @@ const MIGRATIONS: readonly string[] = [
     cancelled_at INTEGER
   );
   `,
+  // 2: handoffs (handoff-delivery, design D4). Title and body are cleared once delivered or expired.
+  `
+  CREATE TABLE handoffs (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    sender_member_id TEXT NOT NULL REFERENCES members (id),
+    sender_device_id TEXT NOT NULL REFERENCES devices (id),
+    recipient_member_id TEXT NOT NULL REFERENCES members (id),
+    enc TEXT NOT NULL,
+    title TEXT,
+    body TEXT,
+    request_hash BLOB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'expired')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    delivered_device_id TEXT REFERENCES devices (id),
+    ended_at INTEGER,
+    UNIQUE (sender_member_id, client_id)
+  );
+  CREATE INDEX handoffs_recipient_pending ON handoffs (recipient_member_id, status, created_at);
+  CREATE INDEX handoffs_sender_created ON handoffs (sender_member_id, created_at);
+  `,
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
@@ -86,6 +109,8 @@ export function openDatabaseFile(path: string): Database {
     // The busy timeout first: it changes nothing on disk, and without it reading the version or switching to
     // WAL while another process holds a lock fails at once.
     db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`)
+    // Freed pages and cells are zeroed, so cleared handoff text does not linger in the file (design D7).
+    db.exec('PRAGMA secure_delete = ON')
     // Read before changing anything: setting WAL first would rewrite a newer database's header.
     const found = userVersion(db)
     if (found > SCHEMA_VERSION) throw new SchemaTooNewError(found)
@@ -114,6 +139,25 @@ function migrate(db: DatabaseSync): void {
     }
     if (current !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
   })
+}
+
+export const DEFAULT_BUSY_TIMEOUT_MS = BUSY_TIMEOUT_MS
+
+/**
+ * Copies the write-ahead log into the database and truncates it to zero bytes, without waiting for other
+ * processes: with another process in a transaction it returns false at once instead of blocking for the busy
+ * timeout (design D7).
+ */
+export function truncateWal(db: Database): boolean {
+  db.exec('PRAGMA busy_timeout = 0')
+  try {
+    const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+    return row.busy === 0
+  } catch {
+    return false
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`)
+  }
 }
 
 /** Runs `fn` inside `BEGIN IMMEDIATE … COMMIT`, rolling back if it throws. */

@@ -45,6 +45,22 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
   assert.equal((await helloing.request('hello', { protocol: [1], deviceId, deviceSecret })).ok, true)
   assert.equal((await helloing.request('device.rename', { name: 'desk' })).ok, true)
 
+  // A second member hands work to sam; sam's connected device receives and acknowledges it.
+  const kimInvite = await admin('invite', 'create')
+  cliOutput.push(kimInvite.stdout.split('\n').slice(1).join('\n'))
+  const kim = await TestClient.open(url)
+  const kimJoined = await kim.request('join', {
+    protocol: [1], code: new URL(kimInvite.stdout.split('\n')[0]!).searchParams.get('c'), handle: 'kim', displayName: 'Kim', deviceName: 'k',
+  })
+  assert.equal(kimJoined.ok, true)
+  assert.equal((await kim.request('team.members')).r.members.length, 2)
+  const handoffText = { title: 'secret-title-7f3a9c', body: 'secret-body-' + 'q'.repeat(5000) + '-e1d2' }
+  const sent = await kim.request('handoff.send', { clientId: 'h1', to: 'sam', payload: { enc: 'none', ...handoffText } })
+  assert.equal(sent.ok, true)
+  const incoming = await helloing.nextEvent('handoff.incoming')
+  assert.deepEqual((await helloing.request('handoff.received', { id: incoming.d.id })).r, {})
+  kim.close()
+
   const second = await admin('invite', 'create', '--member', 'sam')
   cliOutput.push(second.stdout.split('\n').slice(1).join('\n'), second.stderr)
   const secondCode = new URL(second.stdout.split('\n')[0]!).searchParams.get('c')!
@@ -75,16 +91,21 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
   return {
     serverOutput: server.output(),
     cliOutput: cliOutput.join('\n'),
-    secrets: [code, code.toLowerCase(), secondCode, deviceSecret, laptopJoin.r.deviceSecret],
+    secrets: [code, code.toLowerCase(), secondCode, deviceSecret, laptopJoin.r.deviceSecret, kimJoined.r.deviceSecret,
+      handoffText.title, 'secret-body-'],
+    handoffId: sent.r.handoff.id as string,
   }
 }
 
 test('secrets stay out of the server log and the CLI output; joins are logged by name', async (t) => {
-  const { serverOutput, cliOutput, secrets } = await exercise(t)
+  const { serverOutput, cliOutput, secrets, handoffId } = await exercise(t)
   for (const secret of secrets) {
     assert.equal(serverOutput.includes(secret), false, 'server log contains a secret')
     assert.equal(cliOutput.includes(secret), false, 'CLI output contains a secret')
   }
+  assert.match(serverOutput, new RegExp(`handoff ${handoffId} from member m_[0-9a-f]{32} to sam stored`))
+  assert.match(serverOutput, new RegExp(`handoff ${handoffId} offered to device d_[0-9a-f]{32}`))
+  assert.match(serverOutput, new RegExp(`handoff ${handoffId} delivered to device d_[0-9a-f]{32}`))
   assert.match(serverOutput, /joined: member sam \(m_[0-9a-f]{32}\), device "home desktop" \(d_[0-9a-f]{32}\)/)
 })
 

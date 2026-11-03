@@ -1,0 +1,37 @@
+## 1. Configuration and storage
+
+- [x] 1.1 Add `HANDOFF_RATE_PER_HOUR` to `src/config.ts` (integer 1–10000, default 30); verify with unit tests for the default, a valid value, `0` and `many`
+- [x] 1.2 Add schema migration 2 (the `handoffs` table and indexes of design D4) and `PRAGMA secure_delete = ON` in `openDatabaseFile`; verify with unit tests that a version-1 database (made with only the first migration) is upgraded in place with its members kept, that a fresh one reaches version 2, and that `secure_delete` is on
+- [x] 1.3 Bump the server version to 0.2.0 (`package.json`, `src/version.ts`); verify the version test passes
+
+## 2. Handoff rules
+
+- [x] 2.1 Implement `src/handoffs.ts` validation (`clientId` pattern, `to`, `payload.enc` = `none`, title ≤ 200 and body ≤ 20,000 UTF-16 code units, empty allowed, well-formed UTF-16, `BAD_PARAMS` with `detail.field` and `detail.limit`); verify with unit tests including a body of exactly 20,000 and of 20,001 code units, a non-BMP character counted as two, an empty title, and a lone surrogate
+- [x] 2.2 Implement sending in one immediate transaction per design D5 (duplicate first → existing handoff with current status, recipient by stored member id, `duplicate: true`; changed request → `HANDOFF_ID_REUSED`; `RECIPIENT_UNKNOWN`; `RECIPIENT_IS_SELF`; `RATE_LIMITED` with `retryAt` by the `(n − L + 1)`-th oldest rule; insert as `pending` with `expiresAt` 30 days on; `recipient.deviceCount`); verify with unit tests for every scenario of the sending, recipients, resending and rate requirements using an injected clock, including a resend after delivery, a resend while at the limit, a send at exactly `retryAt`, and a lowered limit
+- [x] 2.3 Implement acknowledgement (first wins → `delivered` with device and time, text cleared; same device again → ok; other device after delivery → `HANDOFF_DELIVERED_ELSEWHERE`; expired, or pending past `expiresAt` → `HANDOFF_EXPIRED`; unknown or another member's → `HANDOFF_UNKNOWN`), the pending list of a member (oldest first, not past `expiresAt`), and the expiry of overdue handoffs; verify with unit tests for each, including the pending-but-overdue acknowledgement
+- [x] 2.4 Expire a member's pending handoffs when the member is removed, inside `removeMemberById` (design D6); verify with unit tests through `removeMember` and through `leave` from the last device, and that handoffs the removed member sent stay pending
+
+## 3. Delivery over the connection
+
+- [x] 3.1 Extend `test/helpers/client.ts` to wait for an event of a kind, keeping answers and events in one list in arrival order (so "event after the answer" can be checked); verify with the tests of 3.3
+- [x] 3.2 Add events to the connection (`sendEvent`), `EVENT_KINDS`, the new error codes, and the operations `handoff.send`, `handoff.received`, `team.members` to the registry; update the existing tests that assume the old operations list and use `handoff.send` as the unknown operation (now `presence.set`); verify with tests that `operations` is exactly the five of the modified `server-connection` spec, that `presence.set` is `UNKNOWN_OPERATION`, and that `team.members` lists active members by handle with only id, handle and display name
+- [x] 3.3 Implement `src/delivery.ts` per design D2 (ready connections per member, leases, offer on send / on ready / on close except when replaced, never twice on one connection, re-read the row before offering, no offers while closing) and wire it into `server.ts` and `connection.ts` (call `onReady` after the authentication answer is sent; pass the close reason); verify with integration tests over real WebSockets for every scenario of the "Offering to one device at a time" and "Acknowledging delivery" requirements, including: the event arrives after the `hello` answer (checked on the arrival-ordered list); a leased device that reconnects and replaces its old connection gets the event on the new connection and the other device does not; a re-offer to the same device is acknowledged with `{}`; the late acknowledgement after a lease moved; no offers during shutdown (arranged so that the leased laptop connected first and is closed before the desktop, otherwise the test proves nothing); plus unit tests of `Delivery` with fake connections for a replacing connection that closes before becoming ready (the other ready device then gets the handoff) and for an offer whose row read throws (logged, the server keeps running, the handoff stays pending)
+- [x] 3.4 Verify end to end that a handoff to an offline recipient is held across a server restart (child process stopped and started on the same data directory) and offered on the recipient's next `hello`, once
+- [x] 3.5 Verify that a member removed by the admin command line while a handoff for them is pending is never offered it, and that a removed sender's pending handoff is still delivered with `from` naming them; integration tests
+
+## 4. Maintenance and hygiene
+
+- [x] 4.1 Run the maintenance step every minute (expire overdue handoffs, then `wal_checkpoint(TRUNCATE)` with `busy_timeout` 0 and restored after), with the interval injectable and cleared on shutdown before the database closes; verify with tests that a handoff with a 20,000-character body appears in no file of the data directory after one maintenance step once it was (a) delivered, (b) expired by time, (c) expired because the CLI removed its recipient; and that while another connection holds a read transaction the step returns within 100 ms and a later step after the reader ends clears the text; and that the shutdown test still exits 0 with a short maintenance interval
+- [x] 4.2 Log handoff events by id, handles and device ids only (design D10); extend the log hygiene test so that a sent, offered and acknowledged handoff's title and body appear nowhere in the server's output while its id does
+- [x] 4.3 Extend the no-outbound-connections test to exercise `handoff.send`, `handoff.received` and `team.members`, and verify it still records no socket and no lookup
+
+## 5. Documentation
+
+- [x] 5.1 Update `docs/protocol.md`: `team.members`, `handoff.send`, `handoff.received`, the `handoff.incoming` event, the new error codes with their `detail` fields (not in the before-authentication table, since none occurs there), the receiving rules for clients, which device is offered a handoff, the 30-day hold and what the server keeps; replace the two sentences that say there are no events and that handoff contents come later; verify by checking it item by item against the `handoff-delivery`, `team-directory` and modified `server-connection` specs
+- [x] 5.2 Extend the protocol document test: compare the event kinds listed in `docs/protocol.md` with `EVENT_KINDS`, and check the client-action table only for the error codes that can occur before authentication (an explicit list in `src/errors.ts`); verify each check fails when one side changes, then passes
+- [x] 5.3 Update `docs/self-hosting.md` with `HANDOFF_RATE_PER_HOUR` and what the server keeps of a handoff and for how long (text deleted from the data directory's files after delivery or expiry; metadata and an unsalted hash stay); verify both appear and the page still fits on one page
+
+## 6. Regression
+
+- [x] 6.1 Run `npm test` and `npm run typecheck` and confirm both pass
+- [x] 6.2 Build the container and verify on a Docker network that a handoff sent from one client container reaches another client container's `handoff.incoming`, is acknowledged, and that the admin command line still works

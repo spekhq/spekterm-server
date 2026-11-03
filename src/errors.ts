@@ -15,10 +15,35 @@ export const ERROR_CODES = [
   'INVITE_EXPIRED',
   'INVITE_USED',
   'HANDLE_TAKEN',
+  'RECIPIENT_UNKNOWN',
+  'RECIPIENT_IS_SELF',
+  'HANDOFF_ID_REUSED',
+  'RATE_LIMITED',
+  'HANDOFF_UNKNOWN',
+  'HANDOFF_EXPIRED',
+  'HANDOFF_DELIVERED_ELSEWHERE',
   'INTERNAL',
 ] as const
 
 export type ErrorCode = (typeof ERROR_CODES)[number]
+
+/**
+ * The codes that can answer a request before authentication, each of which is followed by close 4003. The
+ * protocol document gives a client action for each of these (section 4).
+ */
+export const PRE_AUTH_ERROR_CODES: readonly ErrorCode[] = [
+  'BAD_FRAME',
+  'BAD_PARAMS',
+  'UNKNOWN_OPERATION',
+  'UNSUPPORTED_VERSION',
+  'NOT_AUTHENTICATED',
+  'AUTH_FAILED',
+  'INVITE_UNKNOWN',
+  'INVITE_EXPIRED',
+  'INVITE_USED',
+  'HANDLE_TAKEN',
+  'INTERNAL',
+]
 
 /** An error that becomes an error answer with this code. */
 export class ProtocolError extends Error {
