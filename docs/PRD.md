@@ -332,7 +332,7 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 
 ## 13. Open questions
 
-1. **Repository name.** `spekterm-server`, under `spekhq`.
+None at present.
 
 ### 13.1 Decided (2026-11-03)
 
@@ -368,3 +368,4 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
   delivery, so a sent handoff appears without its title on the sender's other devices or after reinstalling; the
   sending device keeps its own copy. Keeping titles would make them the one piece of text the server holds for
   90 days (handoff-return, design D9).
+- **Repository**: `spekhq/spekterm-server` on GitHub, public (2026-11-04; was open question 2).

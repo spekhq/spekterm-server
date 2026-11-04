@@ -9,6 +9,8 @@ machine the whole team trusts.
 ## 1. Build and run
 
 ```sh
+git clone https://github.com/spekhq/spekterm-server.git
+cd spekterm-server
 docker build -t spekterm-server .
 docker volume create spekterm-data
 docker run -d --name spekterm-server --restart unless-stopped \
