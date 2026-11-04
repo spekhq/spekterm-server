@@ -4,9 +4,9 @@ The contract between spekterm (the client) and spekterm-server. It is written so
 from it alone. `test/protocol-doc.test.ts` fails when the operations, error codes or close codes listed here
 and the ones the server defines differ.
 
-**Status: draft.** Version 1 may still change, additively or not, until a spekterm release ships a client
-for it. From then on version 1 changes only additively — new operations, new optional fields, new event kinds,
-new error codes — and anything else is version 2. A client must ignore fields it does not know.
+**Status: stable.** spekterm v0.3.0 (2026-11-04) shipped the first client for version 1, built against
+spekterm-server 0.3.1. Version 1 now changes only additively — new operations, new optional fields, new event
+kinds, new error codes — and anything else is version 2. A client must ignore fields it does not know.
 
 The frames and most names follow spekterm's own remote protocol (`spekterm/docs/remote-protocol.md`), so the
 two read alike. Section 9 lists where they differ.
