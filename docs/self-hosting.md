@@ -29,6 +29,35 @@ docker run -d --name spekterm-server --restart unless-stopped \
 
 spekterm only connects over `wss://`, so the server needs TLS one way or the other.
 
+## 1b. Without Docker
+
+For a machine that cannot run containers, such as a NAS model without a container package (Synology's ARM "j"
+models have no Container Manager): run it on Node directly. It needs Node 22.22 or later and nothing else; the
+one dependency is plain JavaScript and the database is Node's built-in SQLite, so ARM is fine.
+
+```sh
+git clone https://github.com/spekhq/spekterm-server.git
+cd spekterm-server
+npm ci --omit=dev
+mkdir -p ~/spekterm-data && chmod 700 ~/spekterm-data
+PUBLIC_URL=wss://team.lan:8443 PORT=8443 DATA_DIR=~/spekterm-data \
+  TLS_CERT=~/spekterm-certs/tls.crt TLS_KEY=~/spekterm-certs/tls.key npm start
+```
+
+- **The data directory holds every waiting handoff's text**: keep it, and the TLS key, readable only by the
+  user that runs the server. (The `chmod 644` in section 2b is for the container's user only.)
+- **Admin commands** run with the same environment variables as the server: `DATA_DIR` finds the database,
+  `PUBLIC_URL` and `TLS_CERT` go into invites. Where this guide says
+  `docker exec spekterm-server spekterm-server-admin …`, run `npm run admin -- …` (or `bin/spekterm-server-admin …`)
+  in the checkout instead. A small script that sets the variables and runs the command saves mistakes.
+- **Nothing restarts it for you.** Use the system's service manager (a systemd unit with `Restart=always`), or on
+  a NAS a boot-time task that starts a loop restarting the server when it exits. `SIGTERM` stops it cleanly.
+- **Health check**: `curl -k https://127.0.0.1:8443/healthz` answers 200 (there is no container health check).
+- **Backups and upgrades** as in section 6, with "stop the process, copy the data directory" and
+  "`git pull`, `npm ci --omit=dev`, restart" in place of the container steps.
+- On a NAS, the system already uses ports such as 80, 443, 5000 and 5001: pick another one. Synology's Node.js
+  package may not put `npm` on the path; run `node <node dir>/../lib/node_modules/npm/bin/npm-cli.js` instead.
+
 ## 2a. Behind a reverse proxy (recommended)
 
 Let the proxy hold a certificate from a public authority (for example Caddy or Traefik with ACME) and forward
@@ -53,13 +82,19 @@ device has to join again:
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
   -keyout tls.key -out tls.crt -subj /CN=team.lan -addext subjectAltName=DNS:team.lan
 chmod 644 tls.crt tls.key   # the server runs as uid 1000 and must be able to read both
-docker run -d --name spekterm-server -v spekterm-data:/data -v "$PWD":/certs:ro -p 8443:8080 \
+docker run -d --name spekterm-server --restart unless-stopped \
+  -v spekterm-data:/data -v "$PWD":/certs:ro -p 8443:8080 \
   -e TLS_CERT=/certs/tls.crt -e TLS_KEY=/certs/tls.key -e PUBLIC_URL=wss://team.lan:8443 spekterm-server
 ```
 
 Invites then carry the certificate's fingerprint (`fp`), and spekterm trusts exactly that certificate. With a
 certificate from a **private authority** (mkcert, step-ca) that teammates' systems do not trust, create invites
 with `--pin` to pin it the same way.
+
+A pinned certificate is checked by its fingerprint alone, not by name, so `PUBLIC_URL` may be an IP address (a
+fixed one: the address is in every invite and in every device). It is the one address every device uses, in
+the office and away from it. If teammates also connect from inside the same network, check that the address
+works from there too: some routers do not pass a connection to their own public address back inside.
 
 The certificate is read at startup: **restart the container after replacing it.** Replacing a pinned
 certificate locks every device out; each member needs a new invite.
