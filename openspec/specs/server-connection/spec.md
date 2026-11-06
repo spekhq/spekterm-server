@@ -8,10 +8,11 @@ authenticated, kept alive, replaced and closed, and how its contract is written 
 
 ### Requirement: One WebSocket endpoint
 
-The server SHALL accept WebSocket connections at the path `/connect` and SHALL refuse a WebSocket upgrade on
-any other path with HTTP 404. Messages SHALL be UTF-8 JSON text frames. A frame larger than 256 KiB SHALL
-close the connection with WebSocket close code 1009 and no answer, and SHALL NOT affect any other connection
-or the server process. A binary frame SHALL close the connection with close code 1003.
+The server SHALL accept WebSocket connections at the path `/connect`, and at `/relay` for relay tunnels
+(`phone-relay`), and SHALL refuse a WebSocket upgrade on any other path with HTTP 404. Messages on `/connect`
+SHALL be UTF-8 JSON text frames. A frame larger than 256 KiB SHALL close the connection with WebSocket close code
+1009 and no answer, and SHALL NOT affect any other connection or the server process. A binary frame on `/connect`
+SHALL close the connection with close code 1003.
 
 #### Scenario: Wrong path
 - **WHEN** a client opens a WebSocket to `/ws`
@@ -22,15 +23,21 @@ or the server process. A binary frame SHALL close the connection with close code
 - **THEN** the server closes the first connection with code 1009, and the other device's connection and the
   server keep working
 
+#### Scenario: Relay path
+- **WHEN** a client opens a WebSocket to `/relay`
+- **THEN** the upgrade is accepted, also when relaying is off
+
 ### Requirement: Request, answer and event frames
 
-A client SHALL send requests shaped `{"t":"req","id":<number or string>,"m":"<operation>","p":{…}}`. The
+On `/connect`, and on `/relay` before the splice (`phone-relay`, which also closes a `/relay` connection with
+1003 and no answer when a data frame arrives before the answer), a client SHALL send requests shaped `{"t":"req","id":<number or string>,"m":"<operation>","p":{…}}`. The
 server SHALL answer each request exactly once with `{"t":"res","id":<same id>,"ok":true,"r":<result>}` or
 `{"t":"res","id":<same id>,"ok":false,"e":{"code":"<CODE>","message":"<text>","detail":{…}?}}`, and MAY push
 events shaped `{"t":"evt","k":"<kind>","d":<data>}`. `detail` is optional and its fields are defined per
 error code. A frame that is not valid JSON or lacks these fields SHALL be answered with `BAD_FRAME` (with
-`id: null` when no id could be read). An operation the server does not know SHALL be answered with
-`UNKNOWN_OPERATION`, before any authentication check. A parameter that is missing or has the wrong type or
+`id: null` when no id could be read). An operation the server does not know, or one the endpoint does not accept (on `/relay`, anything but
+`relay.open` and `relay.accept`; on `/connect`, the relay operations while relaying is off), SHALL be answered
+with `UNKNOWN_OPERATION`, before any authentication check. A parameter that is missing or has the wrong type or
 value SHALL be answered with `BAD_PARAMS` with `detail.field` naming it. An unexpected failure inside the
 server SHALL be answered with `INTERNAL`. Fields the server does not know SHALL be ignored, so that later
 versions can add optional fields without breaking older peers.
@@ -54,6 +61,8 @@ versions can add optional fields without breaking older peers.
 - **THEN** the server answers `BAD_PARAMS` with `detail.field: "name"`
 
 ### Requirement: Before authentication
+
+This requirement is about `/connect`; `/relay` has its own single-request rule (`phone-relay`).
 
 Before authentication the server SHALL accept only `invite.inspect`, `join` and `hello`; any other known
 operation SHALL be answered with `NOT_AUTHENTICATED`. If no `join` or `hello` succeeds within 10 seconds of the
@@ -171,13 +180,19 @@ before asking the user.
 ### Requirement: Operations list
 
 The `operations` field of the `join` and `hello` results SHALL list every operation the server accepts after
-authentication. A client SHALL be able to rely on it to hide features the server does not have, instead of
-learning it from `UNKNOWN_OPERATION`.
+authentication on `/connect`. A client SHALL be able to rely on it to hide features the server does not have,
+instead of learning it from `UNKNOWN_OPERATION`.
 
 #### Scenario: Operations of this change
-- **WHEN** a device authenticates with a server of this change
+- **WHEN** a device authenticates with a server of this change running without `RELAY=on`
 - **THEN** `operations` is exactly `["device.leave", "device.rename", "handoff.received", "handoff.send",
   "handoff.sync", "handoff.update", "team.members"]`
+
+#### Scenario: Operations with relaying on
+- **WHEN** a device authenticates with a server of this change running with `RELAY=on`
+- **THEN** `operations` is exactly `["device.leave", "device.rename", "handoff.received", "handoff.send",
+  "handoff.sync", "handoff.update", "relay.grant", "relay.grants", "relay.refuse", "relay.revoke",
+  "team.members"]`
 
 ### Requirement: Renaming this device
 
@@ -193,7 +208,8 @@ rules of team membership. The result SHALL carry the stored `device` (`id`, `nam
 A device SHALL have at most one authenticated connection. When a device authenticates while it already has
 one, the server SHALL close the older connection with close code 4006 and keep the newer one. A client whose
 connection is closed with 4006 SHALL NOT reconnect on its own, so that two machines holding the same
-credential do not keep replacing each other.
+credential do not keep replacing each other. Only `/connect` connections count: a `/relay` connection
+authenticated with `relay.accept` neither replaces the device's `/connect` connection nor is replaced by it.
 
 #### Scenario: Reconnect while the old connection lingers
 - **WHEN** a device's connection is half-open and the device connects and authenticates again
@@ -202,6 +218,10 @@ credential do not keep replacing each other.
 #### Scenario: Revoked after being replaced
 - **WHEN** a device's first connection was replaced by a second one, and the device is then revoked
 - **THEN** the second connection is closed with code 4004
+
+#### Scenario: Tunnel leg alongside the team connection
+- **WHEN** a device has a `/connect` connection and accepts a tunnel on `/relay` with its credential
+- **THEN** neither connection is closed with 4006
 
 ### Requirement: Access ends promptly
 
@@ -224,7 +244,8 @@ with 4004 SHALL NOT reconnect with that credential; it can only join again with 
 ### Requirement: Keepalive
 
 The server SHALL send a WebSocket ping every 30 seconds on each connection and SHALL terminate a connection
-that has not answered the previous ping by the time the next one is due.
+that has not answered the previous ping by the time the next one is due. `/relay` legs follow their own liveness
+rule instead (`phone-relay`, "Liveness of tunnel legs").
 
 #### Scenario: Dead peer
 - **WHEN** a client stops answering pings
@@ -236,10 +257,12 @@ that has not answered the previous ping by the time the next one is due.
 operation the server accepts with its parameters and result, every event the server sends with its data,
 every error code with its `detail` fields, every close code with what the client should do on it, how to
 recover when a join's answer is lost, the rules a client follows to receive handoffs (requirement "Receiving
-rules for clients" of `handoff-delivery`), and the rules a client follows to report statuses and keep its Sent
-list (requirement "Sending rules for clients" of `handoff-status`), so that a client can be built from it alone.
-A test SHALL fail when the operations, the event kinds, the error codes or the close codes listed in the
-document differ from those the server defines.
+rules for clients" of `handoff-delivery`), the rules a client follows to report statuses and keep its Sent
+list (requirement "Sending rules for clients" of `handoff-status`), and the relay: the `/relay` endpoint, its
+operations, splicing, flow control, how a tunnel ends, what the phone and the desktop do on each error and close
+code, and what the server sees (`phone-relay`), so that a client can be built from it alone.
+A test SHALL fail when the operations (of `/connect` and of `/relay`), the event kinds, the error codes or the
+close codes listed in the document differ from those the server defines.
 
 #### Scenario: Undocumented operation
 - **WHEN** an operation is added to the server but not to `docs/protocol.md`
@@ -249,9 +272,13 @@ document differ from those the server defines.
 - **WHEN** an event kind is added to the server but not to `docs/protocol.md`
 - **THEN** the test suite fails, naming the event kind
 
+#### Scenario: Undocumented relay operation
+- **WHEN** an operation is added to the `/relay` endpoint but not to the protocol document's relay section
+- **THEN** the test suite fails, naming the operation
+
 ### Requirement: Identifier format
 
-Member, device, invite and handoff ids SHALL each be 1 to 64 characters of `A`–`Z`, `a`–`z`, `0`–`9`, `_` and
+Member, device, invite, handoff, relay grant and tunnel ids SHALL each be 1 to 64 characters of `A`–`Z`, `a`–`z`, `0`–`9`, `_` and
 `-`, and SHALL NOT begin with `-`, so that a client can use them as keys. Ids are case-sensitive.
 `docs/protocol.md` SHALL state this.
 

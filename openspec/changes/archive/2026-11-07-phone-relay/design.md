@@ -367,6 +367,15 @@ The measured numbers go into `docs/self-hosting.md` (the operator's reference) a
 clients exist, a real session (the phone watching a busy terminal and a conversation through the DS218j) is
 measured from the tunnel's close log (bytes, duration) and `top` (task 7.3).
 
+**Real session through the DS218j** (task 7.3, 2026-11-07 Taipei time): a Pixel 7 on a cellular network reached
+a spekterm desktop at another site through the NAS for 980 s, watching a terminal that printed a 15-line process
+list every 2 s for 5 minutes, then a few hundred lines a second for 5 minutes with one 2.7 MB burst. The tunnel
+carried 893,747 bytes to the phone and 4,663 to the desktop (about 0.9 KiB/s on average) and never dropped; the
+server process used 1.63 s of CPU in 15 minutes (0.2 % of one core on average, at most about 1.4 % over any
+5 s), its RSS grew by 0.3 MB, and the kernel's TCP memory stayed under 60 pages. Far less crossed than the
+terminal printed, so spekterm's remote protocol evidently sends the phone much less than raw terminal output
+(not investigated here; a question for spekterm). The defaults stand.
+
 ### D9. spekterm (desktop) — work for its own change
 
 Recorded here so the server side does not have to be reopened; spekterm's change decides the details.

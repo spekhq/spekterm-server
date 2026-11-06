@@ -176,6 +176,7 @@ to the server, and the server passes the bytes between them.
   | 1 tunnel, 512 KiB/s in 1 KiB messages (the default cap) | 13–16 % |
   | 2 tunnels at the default cap | 26 % |
   | 1 tunnel to a phone on a slow link (kernel socket memory, an upper bound) | 4 %, under 4 MiB |
+  | A real phone watching a busy terminal for 16 minutes over a cellular network (about 0.9 KiB/s crossed) | 0.2 % on average |
 
   The defaults (32 tunnels, 512 KiB/s per tunnel and direction) come from these numbers. On a machine without
   AES instructions (many ARM boards), ChaCha20 is cheaper; the server prefers it when it serves TLS itself. Behind

@@ -45,9 +45,10 @@ test('slow phone: the server holds about one window for it, and every byte arriv
 })
 
 test('slow phone outlasts the keepalive', async (t) => {
+  // Pings every 200 ms and a 2 s stall: many missed-pong windows, with room for a busy test machine.
   const s = await relaySetup(t, {
     relay: { enabled: true, kibPerSecond: 0 },
-    relayTimings: { pingIntervalMs: 100, stallMs: 600 },
+    relayTimings: { pingIntervalMs: 200, stallMs: 2000 },
   })
   const { phone, desktop } = await openTunnel(s)
   phone.keep = false
@@ -61,7 +62,7 @@ test('slow phone outlasts the keepalive', async (t) => {
   const sender = flood(desktop.ws, 16 * 1024)
   const samples: number[] = []
   for (let i = 0; i < 20; i++) {
-    await wait(150)
+    await wait(200)
     samples.push(phone.received)
   }
   clearInterval(pacer)
