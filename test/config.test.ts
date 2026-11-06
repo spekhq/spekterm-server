@@ -3,7 +3,16 @@ import assert from 'node:assert/strict'
 import { ConfigError, loadConfig } from '../src/config.ts'
 
 test('defaults', () => {
-  assert.deepEqual(loadConfig({}), { port: 8080, dataDir: '/data', publicUrl: null, tls: null, handoffRatePerHour: 30 })
+  assert.deepEqual(loadConfig({}), {
+    port: 8080,
+    dataDir: '/data',
+    publicUrl: null,
+    tls: null,
+    handoffRatePerHour: 30,
+    relay: false,
+    relayMaxTunnels: 32,
+    relayKibPerSecond: 512,
+  })
 })
 
 test('all variables', () => {
@@ -14,6 +23,9 @@ test('all variables', () => {
     TLS_CERT: '/c.pem',
     TLS_KEY: '/k.pem',
     HANDOFF_RATE_PER_HOUR: '120',
+    RELAY: 'on',
+    RELAY_MAX_TUNNELS: '8',
+    RELAY_KIB_PER_SECOND: '0',
   })
   assert.deepEqual(config, {
     port: 9000,
@@ -21,6 +33,9 @@ test('all variables', () => {
     publicUrl: 'wss://team.example.com:8443',
     tls: { certPath: '/c.pem', keyPath: '/k.pem' },
     handoffRatePerHour: 120,
+    relay: true,
+    relayMaxTunnels: 8,
+    relayKibPerSecond: 0,
   })
 })
 
@@ -52,4 +67,18 @@ test('invalid handoff rate names the variable', () => {
     assert.throws(() => loadConfig({ HANDOFF_RATE_PER_HOUR: bad }), (e: unknown) => e instanceof ConfigError && e.variable === 'HANDOFF_RATE_PER_HOUR')
   }
   assert.equal(loadConfig({ HANDOFF_RATE_PER_HOUR: '10000' }).handoffRatePerHour, 10000)
+})
+
+test('relay settings: values and bounds', () => {
+  assert.equal(loadConfig({ RELAY: 'off' }).relay, false)
+  const named = (variable: string) => (e: unknown) => e instanceof ConfigError && e.variable === variable
+  assert.throws(() => loadConfig({ RELAY: 'yes' }), named('RELAY'))
+  assert.throws(() => loadConfig({ RELAY: 'ON' }), named('RELAY'))
+  assert.throws(() => loadConfig({ RELAY_MAX_TUNNELS: '0' }), named('RELAY_MAX_TUNNELS'))
+  assert.throws(() => loadConfig({ RELAY_MAX_TUNNELS: '1001' }), named('RELAY_MAX_TUNNELS'))
+  assert.throws(() => loadConfig({ RELAY_MAX_TUNNELS: 'many' }), named('RELAY_MAX_TUNNELS'))
+  assert.equal(loadConfig({ RELAY_MAX_TUNNELS: '1000' }).relayMaxTunnels, 1000)
+  assert.equal(loadConfig({ RELAY_KIB_PER_SECOND: '1048576' }).relayKibPerSecond, 1048576)
+  assert.throws(() => loadConfig({ RELAY_KIB_PER_SECOND: '1048577' }), named('RELAY_KIB_PER_SECOND'))
+  assert.throws(() => loadConfig({ RELAY_KIB_PER_SECOND: '-1' }), named('RELAY_KIB_PER_SECOND'))
 })

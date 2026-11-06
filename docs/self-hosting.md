@@ -26,6 +26,9 @@ docker run -d --name spekterm-server --restart unless-stopped \
 | `DATA_DIR` | Where the database lives. Default `/data` (the volume). |
 | `TLS_CERT`, `TLS_KEY` | PEM certificate chain and key, if the server serves TLS itself (section 2b). Both or neither. |
 | `HANDOFF_RATE_PER_HOUR` | The most handoffs one member may send in any hour, across their devices. Default `30` (1–10000). Stops a looping agent from flooding a teammate. |
+| `RELAY` | `on` to relay members' phones to their own desktops (section 7). Default `off`. |
+| `RELAY_MAX_TUNNELS` | The most relay tunnels at once. Default `32` (1–1000). |
+| `RELAY_KIB_PER_SECOND` | The most KiB per second each direction of a tunnel carries. Default `512` (0–1048576; `0` means no cap). |
 
 spekterm only connects over `wss://`, so the server needs TLS one way or the other.
 
@@ -69,8 +72,9 @@ team.example.com {
 }
 ```
 
-The proxy must forward `/connect` as a WebSocket upgrade and keep idle connections open for at least a minute
-(the server pings every 30 seconds). Invites carry no certificate fingerprint; spekterm checks the certificate
+The proxy must forward `/connect` (and `/relay`, if you turn relaying on) as a WebSocket upgrade and keep idle
+connections open for at least a minute (the server pings every 30 seconds). Caddy's `reverse_proxy` above
+forwards every path, both included. Invites carry no certificate fingerprint; spekterm checks the certificate
 against the system's trust store.
 
 ## 2b. TLS served by the server, with a self-signed certificate
@@ -148,3 +152,42 @@ newer one has written, and leaves it unchanged, so you can go back by restoring 
 
 The server tells spekterm which protocol versions it speaks; spekterm says so plainly when the two do not
 match.
+
+## 7. Relaying phones
+
+spekterm's remote access connects a phone directly to its owner's desktop. Away from the desktop's network that
+needs a VPN or a port forward. With `RELAY=on`, the server can stand in: the phone and the desktop each connect
+to the server, and the server passes the bytes between them.
+
+- **Off until you turn it on**, and each member also has to turn it on in spekterm for their desktop.
+- **Blind.** What crosses is the phone's TLS to the desktop, pinned to the desktop's certificate. You cannot read
+  or change it. You see which desktop is reached through which grant, when, from where, for how long and how many
+  bytes; the log shows tunnel and grant ids, durations and byte counts.
+- **Only a member's own phone to that member's own desktop.** The desktop gives each of its paired phones a grant;
+  `member list` shows them under the desktop. Revoking the device or removing the member ends them.
+- **No push.** The desktop has to be running and connected for its phone to reach it.
+- **Load.** Unlike handoffs, a watched terminal streams continuously. Measured on a Synology DS218j (two ARMv7
+  cores, 500 MB of memory, Node 22), in the server process:
+
+  | Load | CPU of one core |
+  |---|---|
+  | 20 idle tunnels (about 160 KiB of memory each) | 0.2 % |
+  | 1 tunnel, 64 KiB/s in 1 KiB messages | 6 % |
+  | 1 tunnel, 512 KiB/s in 1 KiB messages (the default cap) | 13–16 % |
+  | 2 tunnels at the default cap | 26 % |
+  | 1 tunnel to a phone on a slow link (kernel socket memory, an upper bound) | 4 %, under 4 MiB |
+
+  The defaults (32 tunnels, 512 KiB/s per tunnel and direction) come from these numbers. On a machine without
+  AES instructions (many ARM boards), ChaCha20 is cheaper; the server prefers it when it serves TLS itself. Behind
+  a reverse proxy, prefer `TLS_CHACHA20_POLY1305_SHA256` there if your proxy allows it.
+- **On other hardware**, measure before changing the limits:
+
+  ```sh
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+    -keyout /tmp/bench.key -out /tmp/bench.crt -subj /CN=bench
+  node scripts/relay-bench.mjs node_modules/ws /tmp/bench.crt /tmp/bench.key          # default cipher
+  node scripts/relay-bench.mjs node_modules/ws /tmp/bench.crt /tmp/bench.key chacha   # ChaCha20 preferred
+  ```
+
+  It runs on 127.0.0.1 only, for a few minutes, and prints the server process's CPU and memory per scenario.
+

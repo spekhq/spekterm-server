@@ -68,7 +68,7 @@ export function validateHandle(value: unknown): string {
 // Secrets and ids
 
 /** `m_`, `d_` or `i_` and 32 lower-case hex digits: never starts with `-` (design D11). */
-export function newId(kind: 'm' | 'd' | 'i' | 'h'): string {
+export function newId(kind: 'm' | 'd' | 'i' | 'h' | 'g' | 't'): string {
   return `${kind}_${randomBytes(16).toString('hex')}`
 }
 
@@ -100,7 +100,8 @@ export function newInviteCode(): string {
   return base32(randomBytes(16))
 }
 
-function sha256(text: string): Buffer {
+/** SHA-256 of a text in UTF-8: how secrets and codes are stored. */
+export function sha256(text: string): Buffer {
   return createHash('sha256').update(text, 'utf8').digest()
 }
 
@@ -469,10 +470,18 @@ function removeMemberById(db: Database, memberId: string, at: number): void {
     else touch.run(nextSeq(db), at, h.id)
   }
   db.prepare('UPDATE members SET removed_at = ? WHERE id = ?').run(at, memberId)
+  db.prepare(
+    'DELETE FROM relay_grants WHERE device_id IN (SELECT id FROM devices WHERE member_id = ? AND revoked_at IS NULL)',
+  ).run(memberId)
   db.prepare('UPDATE devices SET revoked_at = ? WHERE member_id = ? AND revoked_at IS NULL').run(at, memberId)
   db.prepare(
     'UPDATE invites SET cancelled_at = ? WHERE member_id = ? AND used_at IS NULL AND cancelled_at IS NULL',
   ).run(at, memberId)
+}
+
+/** Inside a transaction: deletes a device's relay grants, as its revocation does (phone-relay, design D2). */
+function deleteGrantsOf(db: Database, deviceId: string): void {
+  db.prepare('DELETE FROM relay_grants WHERE device_id = ?').run(deviceId)
 }
 
 /** Removes a member; returns the ids of the devices that were revoked by it. */
@@ -493,6 +502,7 @@ export function revokeDevice(db: Database, deviceId: string, now: Clock): void {
   writeTransaction(db, () => {
     const result = db.prepare('UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), deviceId)
     if (result.changes === 0) throw new NotFoundError(`no device "${deviceId}" on the team`)
+    deleteGrantsOf(db, deviceId)
   })
 }
 
@@ -505,6 +515,7 @@ export function leave(db: Database, deviceId: string, now: Clock): { memberRemov
     if (row === undefined) throw new ProtocolError('AUTH_FAILED', 'this device is not on the team')
     const at = now()
     db.prepare('UPDATE devices SET revoked_at = ? WHERE id = ?').run(at, deviceId)
+    deleteGrantsOf(db, deviceId)
     if (deviceCount(db, row.member_id) > 0) return { memberRemoved: false }
     removeMemberById(db, row.member_id, at)
     return { memberRemoved: true }

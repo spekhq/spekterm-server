@@ -183,3 +183,21 @@ test('with the server running: a new invite is redeemable at once, and member re
   assert.equal((await client.closed).code, 4004)
   assert.ok(Date.now() - started < 10_000)
 })
+
+test('member list shows a desktop\'s relay grants, never their secrets', async (t) => {
+  const { env, db } = setup(t)
+  const handle = db()
+  const sam = seedMember(handle, 'sam', 'home desktop')
+  const { createGrant, touchGrant } = await import('../src/relay.ts')
+  const yesterday = Date.UTC(2026, 10, 5, 9, 0, 0)
+  const { grant, secret } = createGrant(handle, sam.device.id, 'Pixel 8', () => yesterday - 3_600_000)
+  touchGrant(handle, grant.id, () => yesterday)
+  handle.close()
+  const listed = await runAdmin(['member', 'list'], env)
+  assert.equal(listed.status, 0, listed.stderr)
+  assert.match(
+    listed.stdout,
+    new RegExp(`${sam.device.id}  "home desktop"[^\\n]*\\n        relay grant ${grant.id}  "Pixel 8"  created 2026-11-05T08:00:00.000Z  last used 2026-11-05T09:00:00.000Z`),
+  )
+  assert.equal(listed.stdout.includes(secret), false)
+})

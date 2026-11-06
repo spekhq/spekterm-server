@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TestClient } from './helpers/client.ts'
+import { RelayClient } from './helpers/relay.ts'
 import { tempDir } from './helpers/db.ts'
 import { runAdmin, spawnServer } from './helpers/process.ts'
 
@@ -12,7 +13,7 @@ const PROBE = fileURLToPath(new URL('./helpers/outbound-probe.mjs', import.meta.
 /** Runs every operation and admin command against a real server process; returns all output and secrets. */
 async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<string, string> = {}) {
   const dir = tempDir(t)
-  const env = { DATA_DIR: dir, PUBLIC_URL: 'wss://team.example.com', ...extraEnv }
+  const env = { DATA_DIR: dir, PUBLIC_URL: 'wss://team.example.com', RELAY: 'on', ...extraEnv }
   const server = await spawnServer(env)
   t.after(() => server.child.kill('SIGKILL'))
   const url = `ws://127.0.0.1:${server.port}/connect`
@@ -44,6 +45,28 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
   const helloing = await TestClient.open(url)
   assert.equal((await helloing.request('hello', { protocol: [1], deviceId, deviceSecret })).ok, true)
   assert.equal((await helloing.request('device.rename', { name: 'desk' })).ok, true)
+
+  // Sam's phone reaches the desktop through a tunnel that carries a marker each way, then the grant is revoked.
+  const granted = (await helloing.request('relay.grant', { name: 'Pixel 8' })).r
+  const relayUrl = url.replace(/\/connect$/, '/relay')
+  const phone = await RelayClient.open(relayUrl)
+  const opening = phone.request('relay.open', { protocol: [1], grant: granted.grant.id, secret: granted.secret })
+  const relayIncoming = await helloing.nextEvent('relay.incoming')
+  const desktopLeg = await RelayClient.open(relayUrl)
+  const accepted = await desktopLeg.request('relay.accept', { protocol: [1], deviceId, deviceSecret, tunnel: relayIncoming.d.tunnel })
+  assert.equal(accepted.ok, true)
+  assert.equal((await opening).ok, true)
+  const relayMarker = 'relayed-marker-5e7d0b'
+  phone.ws.send(Buffer.from(relayMarker))
+  desktopLeg.ws.send(Buffer.from(relayMarker))
+  await desktopLeg.until(relayMarker.length)
+  await phone.until(relayMarker.length)
+  const listed = await admin('member', 'list')
+  keep(listed)
+  assert.match(listed.stdout, new RegExp(`relay grant ${granted.grant.id}  "Pixel 8"  created \\S+  last used \\d{4}-`))
+  assert.deepEqual((await helloing.request('relay.revoke', { id: granted.grant.id })).r, { revoked: true })
+  assert.equal((await phone.closed).code, 4004)
+  assert.equal((await desktopLeg.closed).code, 4010)
 
   // A second member hands work to sam; sam's connected device receives and acknowledges it.
   const kimInvite = await admin('invite', 'create')
@@ -108,14 +131,16 @@ async function exercise(t: Parameters<typeof tempDir>[0], extraEnv: Record<strin
     serverOutput: server.output(),
     cliOutput: cliOutput.join('\n'),
     secrets: [code, code.toLowerCase(), secondCode, deviceSecret, laptopJoin.r.deviceSecret, kimJoined.r.deviceSecret,
-      handoffText.title, 'secret-body-', reason, 'secret-report-'],
+      handoffText.title, 'secret-body-', reason, 'secret-report-', granted.secret, relayMarker],
     handoffId: sent.r.handoff.id as string,
+    grantId: granted.grant.id as string,
+    tunnelId: relayIncoming.d.tunnel as string,
     declinedId: declinedSend.r.handoff.id as string,
   }
 }
 
 test('secrets stay out of the server log and the CLI output; joins are logged by name', async (t) => {
-  const { serverOutput, cliOutput, secrets, handoffId, declinedId } = await exercise(t)
+  const { serverOutput, cliOutput, secrets, handoffId, declinedId, grantId, tunnelId } = await exercise(t)
   for (const secret of secrets) {
     assert.equal(serverOutput.includes(secret), false, 'server log contains a secret')
     assert.equal(cliOutput.includes(secret), false, 'CLI output contains a secret')
@@ -125,6 +150,9 @@ test('secrets stay out of the server log and the CLI output; joins are logged by
   assert.match(serverOutput, new RegExp(`handoff ${handoffId} delivered to device d_[0-9a-f]{32}`))
   assert.match(serverOutput, new RegExp(`handoff ${handoffId} done by device d_[0-9a-f]{32} \\(report 1\\)`))
   assert.match(serverOutput, new RegExp(`handoff ${declinedId} declined by device d_[0-9a-f]{32} \\(with a reason\\)`))
+  assert.match(serverOutput, new RegExp(`tunnel ${tunnelId} opened: device d_[0-9a-f]{32}, grant ${grantId}`))
+  assert.match(serverOutput, new RegExp(`tunnel ${tunnelId} closed after \\d+ s: 21 bytes to the desktop, 21 bytes to the phone \\(grant revoked\\)`))
+  assert.match(serverOutput, /relaying phones: at most 32 tunnels, 512 KiB\/s per tunnel and direction/)
   assert.match(serverOutput, /joined: member sam \(m_[0-9a-f]{32}\), device "home desktop" \(d_[0-9a-f]{32}\)/)
 })
 

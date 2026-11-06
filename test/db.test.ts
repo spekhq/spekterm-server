@@ -106,8 +106,8 @@ test('a version-1 database is upgraded in place, keeping its members', (t) => {
   raw.exec("PRAGMA user_version = 1; INSERT INTO members (id, handle, display_name, created_at) VALUES ('m_1', 'sam', 'Sam', 1)")
   raw.close()
   const db = openDatabaseFile(path)
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3)
-  assert.equal(SCHEMA_VERSION, 3)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4)
+  assert.equal(SCHEMA_VERSION, 4)
   assert.equal((db.prepare('SELECT handle FROM members').get() as { handle: string }).handle, 'sam')
   assert.equal((db.prepare('SELECT count(*) AS n FROM handoffs').get() as { n: number }).n, 0)
   db.close()
@@ -134,7 +134,7 @@ test('a version-2 database with handoffs is upgraded in place, numbered in sendi
       ('h_2', 'c2', 'm_a', 'd_a', 'm_s', 'none', NULL, NULL, x'03', 'expired', 200, 250, NULL, NULL, 250);`)
   raw.close()
   const db = openDatabaseFile(path)
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4)
   const rows = db.prepare('SELECT id, status, title, body, seq, changed_at, report_count FROM handoffs ORDER BY seq').all()
   assert.deepEqual(
     rows.map((r) => ({ ...r })),
@@ -186,5 +186,53 @@ test('nextSeq counts up from the counter', (t) => {
   assert.equal(latestSeq(db), 0)
   assert.deepEqual([writeTransaction(db, () => nextSeq(db)), writeTransaction(db, () => nextSeq(db))], [1, 2])
   assert.equal(latestSeq(db), 2)
+  db.close()
+})
+
+test('a version-3 database with handoffs is upgraded in place to relay grants', (t) => {
+  const path = join(tempDir(t), DATABASE_FILE)
+  const raw = new DatabaseSync(path, { enableForeignKeyConstraints: true })
+  for (const migration of MIGRATIONS.slice(0, 3)) raw.exec(migration)
+  raw.exec(`PRAGMA user_version = 3;
+    INSERT INTO members (id, handle, display_name, created_at) VALUES ('m_a', 'alex', 'Alex', 1), ('m_s', 'sam', 'Sam', 1);
+    INSERT INTO devices (id, member_id, name, secret_hash, created_at) VALUES ('d_a', 'm_a', 'desk', x'00', 1), ('d_s', 'm_s', 'desk', x'00', 1);
+    INSERT INTO handoffs (id, client_id, sender_member_id, sender_device_id, recipient_member_id, enc, title, body,
+        request_hash, status, created_at, expires_at, seq, changed_at) VALUES
+      ('h_1', 'c1', 'm_a', 'd_a', 'm_s', 'none', 'Title', 'Body', x'01', 'pending', 100, 9000, 1, 100);
+    UPDATE counters SET value = 1 WHERE name = 'handoff_seq';`)
+  raw.close()
+  const db = openDatabaseFile(path)
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4)
+  assert.deepEqual(
+    { ...(db.prepare('SELECT id, status, title, body, seq FROM handoffs').get() as object) },
+    { id: 'h_1', status: 'pending', title: 'Title', body: 'Body', seq: 1 },
+  )
+  assert.equal((db.prepare('SELECT count(*) AS n FROM relay_grants').get() as { n: number }).n, 0)
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [])
+  db.close()
+})
+
+test('schema 4: relay_grants columns, reference and index', (t) => {
+  const db = openDataDir(tempDir(t))
+  const columns = (db.prepare('PRAGMA table_info(relay_grants)').all() as Array<{ name: string; type: string; notnull: number; pk: number }>)
+    .map((c) => `${c.name} ${c.type}${c.notnull ? ' NOT NULL' : ''}${c.pk ? ' PK' : ''}`)
+  assert.deepEqual(columns, [
+    'id TEXT PK',
+    'device_id TEXT NOT NULL',
+    'name TEXT NOT NULL',
+    'secret_hash BLOB NOT NULL',
+    'created_at INTEGER NOT NULL',
+    'last_used_at INTEGER',
+  ])
+  const fks = (db.prepare('PRAGMA foreign_key_list(relay_grants)').all() as Array<{ from: string; table: string; to: string }>)
+    .map((f) => `${f.from}->${f.table}.${f.to}`)
+  assert.deepEqual(fks, ['device_id->devices.id'])
+  const indexes = (db.prepare('PRAGMA index_list(relay_grants)').all() as Array<{ name: string; unique: number; origin: string }>)
+    .filter((i) => i.origin === 'c')
+    .map((i) => {
+      const cols = (db.prepare(`PRAGMA index_info(${i.name})`).all() as Array<{ name: string }>).map((c) => c.name)
+      return `${i.name}(${cols.join(',')})${i.unique ? ' unique' : ''}`
+    })
+  assert.deepEqual(indexes, ['relay_grants_device(device_id)'])
   db.close()
 })

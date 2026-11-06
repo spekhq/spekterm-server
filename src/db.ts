@@ -128,6 +128,18 @@ export const MIGRATIONS: readonly string[] = [
   );
   INSERT INTO counters (name, value) VALUES ('handoff_seq', (SELECT count(*) FROM handoffs));
   `,
+  // 4: relay grants (phone-relay, design D12). A grant belongs to one desktop device and is deleted with it.
+  `
+  CREATE TABLE relay_grants (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL REFERENCES devices (id),
+    name TEXT NOT NULL,
+    secret_hash BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  CREATE INDEX relay_grants_device ON relay_grants (device_id);
+  `,
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

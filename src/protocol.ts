@@ -15,6 +15,7 @@ import {
   renameDevice,
 } from './team.ts'
 import { acknowledge, sendHandoff, syncSent, updateStatus, validateSend, validateUpdate } from './handoffs.ts'
+import { createGrant, listGrants, revokeGrant, validateId } from './relay.ts'
 import { SERVER_NAME, SERVER_VERSION } from './version.ts'
 
 /** Protocol versions this server speaks. */
@@ -38,12 +39,14 @@ export const CLOSE_CODES = {
   REPLACED: 4006,
   /** The server could not bring this connection's status events up to date. Reconnect with backoff. */
   INTERNAL_ERROR: 1011,
+  /** A relay tunnel's other end is gone. Reconnect with backoff (phone-relay). */
+  TUNNEL_PEER_GONE: 4010,
 } as const
 
 export const MAX_FRAME_BYTES = 256 * 1024
 
 /** Event kinds the server sends (`docs/protocol.md`, "Events"). */
-export const EVENT_KINDS = ['handoff.incoming', 'handoff.status'] as const
+export const EVENT_KINDS = ['handoff.incoming', 'handoff.status', 'relay.incoming'] as const
 
 export interface Request {
   id: number | string
@@ -102,11 +105,21 @@ export interface OperationContext {
   /** Closes the connection with this code once the answer has been sent. */
   closeAfterAnswer(code: number): void
   log(message: string): void
+  /** Whether the operator turned relaying on (`RELAY=on`). */
+  relayEnabled: boolean
+  /** A grant of this device was revoked: end its tunnels. */
+  grantRevoked(grantId: string): void
+  /** This device refuses a pending tunnel offered to it. */
+  refuseTunnel(tunnelId: string): void
+  /** This device was revoked: end its tunnels, settling pending ones first. */
+  deviceRevoked(): void
 }
 
 export interface Operation {
   /** `none`: accepted only before authentication. `device`: only after. */
   auth: 'none' | 'device'
+  /** Offered only when relaying is on; otherwise answered `UNKNOWN_OPERATION` (phone-relay, design D7). */
+  relay?: boolean
   handler(params: Record<string, unknown>, ctx: OperationContext): unknown
 }
 
@@ -114,11 +127,11 @@ function server() {
   return { name: SERVER_NAME, version: SERVER_VERSION }
 }
 
-function describe(identity: Identity, protocol: number) {
+function describe(identity: Identity, protocol: number, relayEnabled: boolean) {
   return {
     protocol,
     server: server(),
-    operations: authenticatedOperations(),
+    operations: authenticatedOperations(relayEnabled),
     team: identity.team,
     member: identity.member,
     device: identity.device,
@@ -142,7 +155,7 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
         `joined: member ${joined.member.handle} (${joined.member.id}), device "${joined.device.name}" (${joined.device.id})`,
       )
       ctx.authenticateAs(joined)
-      return { ...describe(joined, protocol), deviceId: joined.device.id, deviceSecret: joined.deviceSecret }
+      return { ...describe(joined, protocol, ctx.relayEnabled), deviceId: joined.device.id, deviceSecret: joined.deviceSecret }
     },
   },
   hello: {
@@ -151,7 +164,7 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
       const protocol = negotiate(p.protocol)
       const identity = authenticate(ctx.db, p.deviceId, p.deviceSecret, ctx.now)
       ctx.authenticateAs(identity)
-      return describe(identity, protocol)
+      return describe(identity, protocol, ctx.relayEnabled)
     },
   },
   'device.rename': {
@@ -216,11 +229,48 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
       return result
     },
   },
+  'relay.grant': {
+    auth: 'device',
+    relay: true,
+    handler(p, ctx) {
+      const result = createGrant(ctx.db, ctx.deviceId!, p.name, ctx.now)
+      ctx.log(`relay grant ${result.grant.id} created by device ${ctx.deviceId}`)
+      return result
+    },
+  },
+  'relay.grants': {
+    auth: 'device',
+    relay: true,
+    handler(_p, ctx) {
+      return { grants: listGrants(ctx.db, ctx.deviceId!) }
+    },
+  },
+  'relay.revoke': {
+    auth: 'device',
+    relay: true,
+    handler(p, ctx) {
+      const revoked = revokeGrant(ctx.db, ctx.deviceId!, p.id)
+      if (revoked) {
+        ctx.log(`relay grant ${String(p.id)} revoked by device ${ctx.deviceId}`)
+        ctx.grantRevoked(p.id as string)
+      }
+      return { revoked }
+    },
+  },
+  'relay.refuse': {
+    auth: 'device',
+    relay: true,
+    handler(p, ctx) {
+      ctx.refuseTunnel(validateId(p.tunnel, 'tunnel'))
+      return {}
+    },
+  },
   'device.leave': {
     auth: 'device',
     handler(_p, ctx) {
       const result = leave(ctx.db, ctx.deviceId!, ctx.now)
       ctx.log(`device ${ctx.deviceId} left${result.memberRemoved ? '; its member was removed with it' : ''}`)
+      ctx.deviceRevoked()
       ctx.closeAfterAnswer(CLOSE_CODES.REVOKED)
       return result
     },
@@ -228,9 +278,9 @@ export const OPERATIONS: Readonly<Record<string, Operation>> = {
 }
 
 /** Operations accepted after authentication: the `operations` field of `join` and `hello` results. */
-export function authenticatedOperations(): string[] {
+export function authenticatedOperations(relayEnabled: boolean): string[] {
   return Object.entries(OPERATIONS)
-    .filter(([, op]) => op.auth === 'device')
+    .filter(([, op]) => op.auth === 'device' && (relayEnabled || op.relay !== true))
     .map(([name]) => name)
     .sort()
 }

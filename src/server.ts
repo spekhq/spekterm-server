@@ -1,14 +1,15 @@
 /**
- * The server process (`server-connection` and `server-operation` specs): HTTP(S), `/healthz`, the `/connect`
- * WebSocket endpoint, the revocation sweep and shutdown.
+ * The server process (`server-connection`, `server-operation` and `phone-relay` specs): HTTP(S), `/healthz`, the
+ * `/connect` and `/relay` WebSocket endpoints, the revocation sweep and shutdown.
  */
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
+import { DEFAULT_CIPHERS } from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
-import { type Config, ConfigError, loadConfig } from './config.ts'
+import { type Config, ConfigError, DEFAULT_RELAY_KIB_PER_SECOND, DEFAULT_RELAY_MAX_TUNNELS, loadConfig } from './config.ts'
 import { Connection, type ConnectionHost, DEFAULT_TIMINGS, type Timings } from './connection.ts'
 import { type Database, openDataDir, truncateWal } from './db.ts'
 import { Delivery } from './delivery.ts'
@@ -17,8 +18,10 @@ import { deleteOldRecords, deleteOldReports, expireOverdue } from './handoffs.ts
 import { CLOSE_CODES, MAX_FRAME_BYTES } from './protocol.ts'
 import { type Clock, getTeamName, revokedAmong } from './team.ts'
 import { type TlsMaterial, loadTls } from './tls.ts'
+import { Relay, type RelaySettings, type RelayTimings } from './tunnels.ts'
 
 export const CONNECT_PATH = '/connect'
+export const RELAY_PATH = '/relay'
 
 export interface ServerOptions {
   db: Database
@@ -31,6 +34,11 @@ export interface ServerOptions {
   maintenanceIntervalMs?: number
   /** The most handoffs one member may send in any hour. */
   handoffRatePerHour?: number
+  /** Relaying (phone-relay): off unless `enabled`. */
+  relay?: Partial<RelaySettings>
+  relayTimings?: Partial<RelayTimings>
+  /** TLS 1.3 cipher preference for a server that serves TLS itself (phone-relay, design D8). */
+  preferChaCha?: boolean
   /** The `/healthz` check; throws when unhealthy. Defaults to a read of the team table. */
   healthCheck?: () => void
   log?: (message: string) => void
@@ -42,6 +50,7 @@ export interface RunningServer {
   readonly devices: ReadonlyMap<string, Connection>
   readonly delivery: Delivery
   readonly feed: Feed
+  readonly relay: Relay
   /**
    * Runs the maintenance step now: expire overdue handoffs, delete old reports and records, push the changes,
    * truncate the write-ahead log.
@@ -68,6 +77,15 @@ export async function startServer(port: number, options: ServerOptions): Promise
 
   const devices = new Map<string, Connection>()
   const connections = new Set<Connection>()
+  const relay = new Relay(
+    { db, now, log, desktopConnection: (deviceId) => devices.get(deviceId) },
+    {
+      enabled: options.relay?.enabled ?? false,
+      maxTunnels: options.relay?.maxTunnels ?? DEFAULT_RELAY_MAX_TUNNELS,
+      kibPerSecond: options.relay?.kibPerSecond ?? DEFAULT_RELAY_KIB_PER_SECOND,
+    },
+    { pingIntervalMs: timings.pingIntervalMs, authTimeoutMs: timings.authTimeoutMs, refuseDelayMs: timings.refuseDelayMs, ...options.relayTimings },
+  )
 
   const host: ConnectionHost = {
     db,
@@ -85,6 +103,7 @@ export async function startServer(port: number, options: ServerOptions): Promise
       if (devices.get(deviceId) === connection) devices.delete(deviceId)
       delivery.onClosed(connection, reason)
       feed.onClosed(connection)
+      relay.desktopClosed(connection)
     },
     ready(connection) {
       delivery.onReady(connection)
@@ -102,6 +121,16 @@ export async function startServer(port: number, options: ServerOptions): Promise
     },
     afterRequest() {
       feed.publish()
+    },
+    relayEnabled: relay.settings.enabled,
+    grantRevoked(grantId) {
+      relay.grantRevoked(grantId)
+    },
+    refuseTunnel(deviceId, tunnelId) {
+      relay.refuse(deviceId, tunnelId)
+    },
+    deviceRevoked(deviceId) {
+      relay.deviceRevoked(deviceId)
     },
   }
 
@@ -125,7 +154,17 @@ export async function startServer(port: number, options: ServerOptions): Promise
 
   const http: HttpServer =
     options.tls != null
-      ? createHttpsServer({ cert: options.tls.cert, key: options.tls.key, minVersion: 'TLSv1.2' }, handleRequest)
+      ? createHttpsServer(
+          {
+            cert: options.tls.cert,
+            key: options.tls.key,
+            minVersion: 'TLSv1.2',
+            ...(options.preferChaCha === true
+              ? { ciphers: `TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:${DEFAULT_CIPHERS}`, honorCipherOrder: true }
+              : {}),
+          },
+          handleRequest,
+        )
       : createHttpServer(handleRequest)
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES })
@@ -133,6 +172,10 @@ export async function startServer(port: number, options: ServerOptions): Promise
   http.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on('error', () => {})
     const path = new URL(req.url ?? '/', 'http://x').pathname
+    if (path === RELAY_PATH) {
+      wss.handleUpgrade(req, socket, head, (ws) => relay.attach(ws))
+      return
+    }
     if (path !== CONNECT_PATH) {
       socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return
@@ -146,11 +189,15 @@ export async function startServer(port: number, options: ServerOptions): Promise
 
   // Revocations written by the admin command line (another process) reach live connections here, and so do the
   // status changes it made (expiry on removing a member).
+  // Tunnels outlive their desktop's /connect connection, so their devices are checked too (phone-relay, D6).
   const sweep = setInterval(() => {
-    if (devices.size === 0) return
+    const watched = new Set([...devices.keys(), ...relay.deviceIds()])
+    if (watched.size === 0) return
     try {
-      for (const deviceId of revokedAmong(db, [...devices.keys()])) {
-        log(`device ${deviceId} was revoked; closing its connection`)
+      for (const deviceId of revokedAmong(db, [...watched])) {
+        log(`device ${deviceId} was revoked; closing its connection and tunnels`)
+        // Pending tunnels of its (deleted) grants are answered GRANT_INVALID before /connect closes.
+        relay.deviceRevoked(deviceId)
         devices.get(deviceId)?.close(CLOSE_CODES.REVOKED, 'device revoked')
       }
     } catch (error) {
@@ -195,6 +242,7 @@ export async function startServer(port: number, options: ServerOptions): Promise
     devices,
     delivery,
     feed,
+    relay,
     maintain,
     close() {
       closing ??= (async () => {
@@ -203,6 +251,8 @@ export async function startServer(port: number, options: ServerOptions): Promise
         clearInterval(sweep)
         clearInterval(maintenance)
         const closed = new Promise<void>((resolve) => http.close(() => resolve()))
+        // The relay first: pending phones are closed with 1001 and no answer, not told their desktop left.
+        relay.close()
         for (const connection of connections) connection.close(CLOSE_CODES.GOING_AWAY, 'server shutting down')
         // Give peers a moment to complete the closing handshake, then drop whatever is left.
         await new Promise((resolve) => setTimeout(resolve, 200))
@@ -236,7 +286,19 @@ export async function main(env: Record<string, string | undefined> = process.env
     process.stderr.write(`spekterm-server: ${(error as Error).message}\n`)
     process.exit(1)
   }
-  const server = await startServer(config.port, { db, tls, handoffRatePerHour: config.handoffRatePerHour })
+  const server = await startServer(config.port, {
+    db,
+    tls,
+    handoffRatePerHour: config.handoffRatePerHour,
+    relay: { enabled: config.relay, maxTunnels: config.relayMaxTunnels, kibPerSecond: config.relayKibPerSecond },
+    preferChaCha: true,
+  })
+  if (config.relay) {
+    defaultLog(
+      `relaying phones: at most ${config.relayMaxTunnels} tunnels, ` +
+        (config.relayKibPerSecond === 0 ? 'no throughput cap' : `${config.relayKibPerSecond} KiB/s per tunnel and direction`),
+    )
+  }
   if (tls === null) {
     defaultLog(`listening on port ${server.port} without TLS; a TLS terminator (reverse proxy) is expected in front`)
   } else {

@@ -2,8 +2,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { ERROR_CODES, PRE_AUTH_ERROR_CODES } from '../src/errors.ts'
+import { ERROR_CODES, PRE_AUTH_ERROR_CODES, RELAY_ERROR_CODES } from '../src/errors.ts'
 import { CLOSE_CODES, EVENT_KINDS, OPERATIONS } from '../src/protocol.ts'
+import { RELAY_OPERATIONS } from '../src/tunnels.ts'
 
 const DOC = readFileSync(new URL('../docs/protocol.md', import.meta.url), 'utf8')
 
@@ -49,5 +50,17 @@ test('every pre-authentication error has a client action', () => {
   const table = section('## 4. Before authentication')
   for (const code of PRE_AUTH_ERROR_CODES) {
     assert.match(table, new RegExp(`^\\|[^\\n]*\`${code}\``, 'm'), `no client action for ${code}`)
+  }
+})
+
+test('relay operations: section 13 and the /relay registry agree', () => {
+  const documented = [...section('## 13. The relay').matchAll(/^### `([^`]+)`$/gm)].map((m) => m[1]!)
+  diff('relay operations', documented, RELAY_OPERATIONS)
+})
+
+test('every relay error has a client action', () => {
+  const table = section('### 13.6 What the phone and the desktop do')
+  for (const code of RELAY_ERROR_CODES) {
+    assert.match(table, new RegExp(`^\\|[^\\n]*\`${code}\``, 'm'), `no relay client action for ${code}`)
   }
 })

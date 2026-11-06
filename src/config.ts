@@ -7,7 +7,17 @@ export interface Config {
   tls: { certPath: string; keyPath: string } | null
   /** The most handoffs one member may send in any hour. */
   handoffRatePerHour: number
+  /** Whether the server relays phones to their desktops (`RELAY`; phone-relay). */
+  relay: boolean
+  /** The most relay tunnels at once, open or pending. */
+  relayMaxTunnels: number
+  /** The most KiB per second each direction of a tunnel carries; 0 means no cap. */
+  relayKibPerSecond: number
 }
+
+/** Defaults measured on a Synology DS218j (phone-relay, design D8). */
+export const DEFAULT_RELAY_MAX_TUNNELS = 32
+export const DEFAULT_RELAY_KIB_PER_SECOND = 512
 
 export class ConfigError extends Error {
   readonly variable: string
@@ -40,6 +50,21 @@ export function parseRate(raw: string | undefined): number {
     throw new ConfigError('HANDOFF_RATE_PER_HOUR', `must be between 1 and 10000, got ${rate}`)
   }
   return rate
+}
+
+function parseWhole(variable: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined) return fallback
+  if (!/^\d+$/.test(raw)) throw new ConfigError(variable, `must be a whole number, got "${raw}"`)
+  const value = Number(raw)
+  if (value < min || value > max) throw new ConfigError(variable, `must be between ${min} and ${max}, got ${value}`)
+  return value
+}
+
+export function parseRelay(raw: string | undefined): boolean {
+  if (raw === undefined) return false
+  if (raw === 'on') return true
+  if (raw === 'off') return false
+  throw new ConfigError('RELAY', `must be "on" or "off", got "${raw}"`)
 }
 
 export function parsePublicUrl(raw: string | undefined): string | null {
@@ -80,5 +105,8 @@ export function loadConfig(env: Env = process.env): Config {
     publicUrl: parsePublicUrl(nonEmpty(env, 'PUBLIC_URL')),
     tls: certPath !== undefined && keyPath !== undefined ? { certPath, keyPath } : null,
     handoffRatePerHour: parseRate(nonEmpty(env, 'HANDOFF_RATE_PER_HOUR')),
+    relay: parseRelay(nonEmpty(env, 'RELAY')),
+    relayMaxTunnels: parseWhole('RELAY_MAX_TUNNELS', nonEmpty(env, 'RELAY_MAX_TUNNELS'), DEFAULT_RELAY_MAX_TUNNELS, 1, 1000),
+    relayKibPerSecond: parseWhole('RELAY_KIB_PER_SECOND', nonEmpty(env, 'RELAY_KIB_PER_SECOND'), DEFAULT_RELAY_KIB_PER_SECOND, 0, 1048576),
   }
 }

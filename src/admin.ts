@@ -5,6 +5,7 @@
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { ConfigError, loadConfig } from './config.ts'
+import { grantsByDevice } from './relay.ts'
 import { type Database, SchemaTooNewError, openDataDir } from './db.ts'
 import { ProtocolError } from './errors.ts'
 import {
@@ -134,13 +135,16 @@ export function run(argv: string[], env: Record<string, string | undefined>, io:
       }
       case 'member list': {
         positional(rest, 0, 'no arguments')
-        const members = withDatabase(env, listMembers)
+        const { members, grants } = withDatabase(env, (db) => ({ members: listMembers(db), grants: grantsByDevice(db) }))
         if (members.length === 0) io.out('no members')
         for (const m of members) {
           io.out(`${m.handle}  "${m.displayName}"  ${m.id}  joined ${iso(m.createdAt)}`)
           if (m.devices.length === 0) io.out('    (no devices)')
           for (const d of m.devices) {
             io.out(`    ${d.id}  "${d.name}"  joined ${iso(d.createdAt)}  last seen ${iso(d.lastSeenAt)}`)
+            for (const g of grants.get(d.id) ?? []) {
+              io.out(`        relay grant ${g.id}  "${g.name}"  created ${iso(g.createdAt)}  last used ${iso(g.lastUsedAt ?? null)}`)
+            }
           }
         }
         return 0

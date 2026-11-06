@@ -41,6 +41,10 @@ export interface ConnectionHost {
   ready(connection: Connection): void
   /** Settings and hooks operations use. */
   handoffRatePerHour: number
+  relayEnabled: boolean
+  grantRevoked(grantId: string): void
+  refuseTunnel(deviceId: string, tunnelId: string): void
+  deviceRevoked(deviceId: string): void
   handoffSent(handoffId: string, recipientMemberId: string): void
   handoffAcknowledged(handoffId: string): void
   /** Subscribes the connection to its member's status events from `cursor`, or ends it (null). */
@@ -63,6 +67,7 @@ export class Connection implements DeliveryTarget, FeedTarget {
   #refuseTimer: NodeJS.Timeout | undefined
   #awaitingPong = false
   #lastSeenWrite = 0
+  #ready = false
 
   constructor(ws: WebSocket, host: ConnectionHost) {
     this.#ws = ws
@@ -81,6 +86,11 @@ export class Connection implements DeliveryTarget, FeedTarget {
 
   get memberId(): string | null {
     return this.#memberId
+  }
+
+  /** The answer to its join or hello has been sent and it is still open: events may be sent to it. */
+  get ready(): boolean {
+    return this.#ready && this.#state === 'authenticated'
   }
 
   sendEvent(kind: string, data: unknown): void {
@@ -191,7 +201,9 @@ export class Connection implements DeliveryTarget, FeedTarget {
       return
     }
     const { id, m, p } = parsed.request
-    const operation = Object.hasOwn(OPERATIONS, m) ? OPERATIONS[m] : undefined
+    const known = Object.hasOwn(OPERATIONS, m) ? OPERATIONS[m] : undefined
+    // The relay operations exist only while relaying is on (phone-relay, design D7).
+    const operation = known?.relay === true && !this.#host.relayEnabled ? undefined : known
     if (operation === undefined) {
       this.#answerError(id, 'UNKNOWN_OPERATION', `unknown operation "${m}"`)
       return
@@ -226,6 +238,10 @@ export class Connection implements DeliveryTarget, FeedTarget {
         closeCode = code
       },
       log: (message) => this.#host.log(message),
+      relayEnabled: this.#host.relayEnabled,
+      grantRevoked: (grantId) => this.#host.grantRevoked(grantId),
+      refuseTunnel: (tunnelId) => this.#host.refuseTunnel(this.#deviceId!, tunnelId),
+      deviceRevoked: () => this.#host.deviceRevoked(this.#deviceId!),
     }
     let result: unknown
     try {
@@ -246,7 +262,10 @@ export class Connection implements DeliveryTarget, FeedTarget {
     if (operation.auth === 'device') this.#host.afterRequest()
     // Ready only now, after the answer: events must not reach the device before its join / hello answer.
     // Called unconditionally and synchronously, so no other connection can become ready in between.
-    if (!wasAuthenticated && this.#state === 'authenticated') this.#host.ready(this)
+    if (!wasAuthenticated && this.#state === 'authenticated') {
+      this.#ready = true
+      this.#host.ready(this)
+    }
     if (closeCode !== null) this.close(closeCode)
   }
 

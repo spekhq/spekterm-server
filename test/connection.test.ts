@@ -184,7 +184,7 @@ test('join returns the identity and credential and authenticates the connection'
   const answer = await client.request('join', { ...P, code: invite.code, handle: 'sam', displayName: 'Sam', deviceName: 'home desktop' })
   const r = answer.r
   assert.equal(r.protocol, 1)
-  assert.deepEqual(r.server, { name: 'spekterm-server', version: '0.3.1' })
+  assert.deepEqual(r.server, { name: 'spekterm-server', version: '0.4.0' })
   assert.deepEqual(r.operations, ['device.leave', 'device.rename', 'handoff.received', 'handoff.send', 'handoff.sync', 'handoff.update', 'team.members'])
   assert.deepEqual(r.team, { name: 'Team' })
   assert.deepEqual(Object.keys(r.member).sort(), ['deviceCount', 'displayName', 'handle', 'id'])

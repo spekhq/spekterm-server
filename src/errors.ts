@@ -25,6 +25,13 @@ export const ERROR_CODES = [
   'HANDOFF_NOT_DELIVERED',
   'HANDOFF_FINISHED',
   'TOO_MANY_REPORTS',
+  'RELAY_DISABLED',
+  'GRANT_INVALID',
+  'TOO_MANY_GRANTS',
+  'DESKTOP_UNAVAILABLE',
+  'DESKTOP_REFUSED',
+  'RELAY_BUSY',
+  'TUNNEL_UNKNOWN',
   'INTERNAL',
 ] as const
 
@@ -45,6 +52,26 @@ export const PRE_AUTH_ERROR_CODES: readonly ErrorCode[] = [
   'INVITE_EXPIRED',
   'INVITE_USED',
   'HANDLE_TAKEN',
+  'INTERNAL',
+]
+
+/**
+ * The codes that can answer `relay.open` or `relay.accept` on `/relay`, each followed by close 4003. The protocol
+ * document gives the phone's and the desktop's action for each (section 13).
+ */
+export const RELAY_ERROR_CODES: readonly ErrorCode[] = [
+  'BAD_FRAME',
+  'BAD_PARAMS',
+  'UNKNOWN_OPERATION',
+  'UNSUPPORTED_VERSION',
+  'RELAY_DISABLED',
+  'GRANT_INVALID',
+  'RATE_LIMITED',
+  'RELAY_BUSY',
+  'DESKTOP_UNAVAILABLE',
+  'DESKTOP_REFUSED',
+  'AUTH_FAILED',
+  'TUNNEL_UNKNOWN',
   'INTERNAL',
 ]
 
