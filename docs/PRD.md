@@ -1,6 +1,6 @@
 # spekterm-server — Product Requirements
 
-> Status: **approved** · 2026-11-03
+> Status: **approved** · 2026-11-03 · revised 2026-11-06 (relay for one's own phone: §2.4, §7.7, §8.5; under review)
 >
 > This document says what spekterm-server is and why. How it is built (module layout, storage schema, the
 > exact wire format) belongs in `docs/protocol.md` and in the changes that implement it.
@@ -10,7 +10,7 @@
 1. Summary
 2. The problem
 3. Goals
-4. Non-goals (v1)
+4. Non-goals
 5. Concepts
 6. How it is used
 7. Trust model
@@ -34,6 +34,10 @@ sees what happened to it: delivered, taken, done.
 It is **self-hosted** (one container per team), **open source under MIT**, and spekterm's connection to it
 is **off until the user turns it on**. It is a mailbox, a team directory and a presence signal. It runs no
 agents and has no access to anyone's repositories.
+
+When the operator allows it, it is also an optional **blind relay for a member's own phone**: the phone reaches
+its owner's desktop through the server when it cannot reach it directly, with the phone's TLS still ending at
+the desktop (§2.4, §8.5). A direct connection stays the default.
 
 ## 2. The problem
 
@@ -75,6 +79,30 @@ spekterm's PRD earlier ruled out a relay (2026-09-29), but what it ruled out was
 the **same person across machines**, which first-party tooling now covers. This server is a different
 thing: **free, self-hosted, between different people**, which nothing else covers.
 
+### 2.4 One's own phone, away from the desk
+
+spekterm's remote access connects the phone **directly** to the desktop: the desktop listens on a TLS
+WebSocket port, the phone pins the desktop's self-signed certificate, and there is no relay and no push. On the
+same network that just works. Away from it, the phone needs a way in: Tailscale (or another VPN) on both ends,
+or a port forward on the home or office router. Each of these is a setup step per person that many people do
+not take, and a port forward exposes the desktop's listener to the whole internet.
+
+A member of a team already has something the phone can reach from anywhere: the team's server, which the
+desktop keeps a connection to and whose certificate the desktop already verifies. Passing the phone's
+connection through it needs no new account, no router change and no VPN. Because the server only forwards
+bytes and the phone still pins the **desktop's** certificate, the server cannot read or alter what passes (§7.7).
+
+The costs, and why it is still optional and second:
+
+| Cost | Consequence |
+|---|---|
+| **A different load.** Terminal output and conversation updates stream for as long as the phone watches, unlike handoffs, which are a few kilobytes now and then. The server may be a small machine (one team runs it on a two-core ARM NAS with 500 MB of memory). | The operator turns relaying on (§9), the server bounds tunnels and throughput, and the cost was measured on that NAS, not estimated: about 6 % of one core for a tunnel at 64 KiB/s, 16 % at the default cap of 512 KiB/s, 160 KiB of memory per idle tunnel (§8.5, `docs/self-hosting.md` §7). |
+| **One person's traffic on a team machine.** | Only between a member's own phone and that member's own desktop (§7.7). The operator sees when and how much, not what. |
+| **The server reaches the desktop's remote-access TLS endpoint.** Today a server can never reach the listener (§7.1). | Only through a tunnel the desktop itself opens to the same server, for a phone it paired and granted; the desktop still authenticates the phone as on a LAN (§7.7). |
+| **Two paths to maintain.** | Direct stays the default and the phone prefers it; the relay is tried only alongside it (§8.5). |
+
+The relay does **not** make the phone reachable while spekterm is closed: there is still no push (§4). The
+desktop has to be running and connected to the server.
 ## 3. Goals
 
 - **G1 — Hand work to a person, not to a repository.** The sender addresses a teammate. The recipient decides
@@ -87,13 +115,17 @@ thing: **free, self-hosted, between different people**, which nothing else cover
   each member can turn off.
 - **G5 — Any spekterm user can have it.** One container, a short setup guide, no third-party accounts or
   tokens. Joining a team is pasting one invite link.
+- **G6 — One's own phone reaches one's own desktop from anywhere**, when the operator allows it and the member
+  turns it on: through the server, without a VPN or a port forward, with the phone's TLS still ending at the
+  desktop (§2.4).
 
-## 4. Non-goals (v1)
+## 4. Non-goals
 
 | Not in v1 | Why |
 |---|---|
-| **Push notifications** (FCM, UnifiedPush) | A self-hosted server cannot send FCM to the official Android app without the app's Firebase credentials, so it would need an official push gateway. Deferred; v1 notifies only through a connected desktop. |
-| **Relaying the phone's remote access** | The protocol reserves room for it (§8.4), but it is a different load (continuous terminal and conversation streams), carries one person's traffic over a team server, and would double the scope. |
+| **Push notifications** (FCM, UnifiedPush) | A self-hosted server cannot send FCM to the official Android app without the app's Firebase credentials, so it would need an official push gateway. Deferred; v1 notifies only through a connected desktop. The relay (§8.5) does not change this: it carries a live connection, so the desktop must be running. |
+| **Remote access to someone else's desktop** | The relay connects a member's phone to that member's own desktop only (§7.7). Reaching a teammate's machine is a different trust question. |
+| **The relay as the default path, or instead of direct access** | Direct stays the default and needs no server (2026-11-06). The relay is a second path for members of a team whose operator allows it. |
 | **An official hosted instance** | Self-hosting keeps each team's handoffs on its own machine and keeps the maintainer out of everyone's data. |
 | **Opening a session without the recipient's approval** | A teammate's handoff is third-party text to the recipient (§7.2). |
 | **Handoffs to a group or to "whoever is free"** | v1 addresses one person. Groups raise ownership questions ("who took it?") that should be designed on their own. |
@@ -114,6 +146,8 @@ thing: **free, self-hosted, between different people**, which nothing else cover
 | **Status** | Where a handoff is: `pending` (held by the server), `delivered` (reached one of the recipient's devices), `taken` (accepted into a session), `done` (the session's agent reported completion), `declined`, or `expired`. |
 | **Report** | The short result the recipient's agent writes when it finishes, sent back to the sender. |
 | **Presence** | Whether a member has a connected device, as far as that member allows others to see. |
+| **Relay grant** | A credential a desktop asks the server for and gives to one of its paired phones, so that phone can ask the server for a tunnel to that desktop. Belongs to the desktop's device; revocable on its own. |
+| **Tunnel** | One relayed connection: the phone's WebSocket to the server and the desktop's WebSocket to the server, spliced. It carries the phone's TLS to the desktop, which the server cannot read. |
 
 ## 6. How it is used
 
@@ -174,9 +208,10 @@ sent what**. It therefore sees:
 
 It is **not** trusted to make anyone's spekterm do anything else. The only effects a server can cause on a
 desktop are: an item appears in the inbox, a sent handoff's status changes, the directory and presence
-change. That list is an allow-list in the protocol (§8.2), and spekterm rejects anything outside it. In
+change, and, when the member turned the relay on, the desktop opens a tunnel back to the same server for one
+of its own grants (§7.7). That list is an allow-list in the protocol (§8.2), and spekterm rejects anything outside it. In
 particular, a server can never open a session, type into a terminal, read a file, or reach the remote-access
-listener.
+listener on its own (§7.7 for the relay, which the desktop opens itself).
 
 ### 7.2 The recipient: a teammate's handoff is third-party text
 
@@ -222,6 +257,28 @@ setting that sends automatically in v1.
 The team is small and its members are known, so v1 relies on admin removal, plus per-member rate limits
 (handoffs per hour) so that a looping agent cannot flood a teammate's inbox.
 
+### 7.7 The relay
+
+- **Blind.** The server splices bytes between the phone's and the desktop's WebSockets and never terminates
+  the phone's TLS to the desktop. The phone pins the **desktop's** certificate inside the tunnel exactly as on a
+  LAN, and the desktop authenticates the phone with its per-device credential exactly as on a LAN (spekterm's
+  remote protocol). Pairing stays direct: a relayed connection cannot use a pairing code. The server can delay,
+  drop or cut a tunnel; it cannot read or alter one.
+- **What the server sees**: which member's which desktop is reached through which grant, when, from which
+  address, for how long, and how many bytes each way.
+- **Only one's own phone to one's own desktop.** A grant is issued to a desktop device over that device's
+  authenticated connection, and a tunnel opened with it reaches only that device. The desktop hands the grant
+  only to phones it has paired, over their authenticated connection. Removing the member, revoking the device,
+  or the device leaving ends its grants and tunnels.
+- **The server cannot make the desktop connect elsewhere.** The request for a tunnel carries no address: the
+  desktop opens the tunnel to the same server, with the same certificate check, as its team connection, and only
+  for a grant it holds.
+- **What a dishonest operator can do with it** is reach the desktop's remote-access TLS endpoint, as anyone on
+  the desktop's LAN can when remote access is on. It still needs a phone's credential to get any further. A member who does not accept that leaves the relay off; it is off until they turn it on.
+- **A grant is a credential.** Whoever holds one can ask for tunnels to that desktop (and still has to pass the
+  desktop's own authentication). The server stores only a hash; the desktop revokes a phone's grant when it
+  unpairs that phone.
+
 ## 8. The connection between spekterm and the server
 
 ### 8.1 Shape
@@ -261,13 +318,31 @@ operations to the same list, as spekterm does for its remote protocol.
 
 ### 8.4 Reserved for later
 
-The protocol keeps room for **additional channel types** on the same connection. The one in mind is a blind
-relay for the phone's remote access (the phone's TLS to the desktop tunneled through the server, still
-pinned to the desktop), for a later version.
-
-It also keeps room for **end-to-end encryption**: a handoff's title, body and report travel as one payload
+The protocol keeps room for **end-to-end encryption**: a handoff's title, body and report travel as one payload
 with an encryption marker, which v1 always sets to "not encrypted". Adding encryption later is a new marker
 value, not a new message format.
+
+The room it kept for **additional channel types** on the same connection was for the phone relay. The relay
+uses it for its control messages only; the relayed bytes travel on connections of their own (§8.5).
+
+### 8.5 The phone relay
+
+The exact format lives in `docs/protocol.md`; the design is in the `phone-relay` change.
+
+- **Control on the team connection, bytes on their own connections.** The desktop asks for grants and is told
+  of a waiting phone over its existing team connection. Each tunnel is two new WebSockets to the server, one
+  from the phone and one that the desktop opens for it, carrying binary frames only. The team connection stays a
+  text protocol for handoffs, a busy terminal never delays a handoff, and each tunnel has its own flow control.
+- **Opt-in at both ends.** The operator turns relaying on (§9); the member turns it on in spekterm for their
+  desktop, which then gives each paired phone a grant.
+- **The phone prefers direct.** It tries the desktop's own addresses first and the relay alongside them,
+  slightly later, so that on the same network the direct path wins.
+- **Bounded.** The server caps tunnels in total and per desktop, how often a grant may open one, and the
+  throughput of each; the defaults are set from measurements on a small ARM machine.
+- **No resumption.** A tunnel ends when either side's connection ends, when the server restarts, or when its
+  grant or device is revoked. The phone reconnects as it does after any drop; spekterm's remote protocol already
+  resumes a terminal and a conversation after reconnecting.
+- **Still no outbound connections.** Both legs of a tunnel connect to the server.
 
 ## 9. Operating the server
 
@@ -280,7 +355,12 @@ value, not a new message format.
 - **Backups** are a copy of the data directory.
 - **Upgrades.** The server states the protocol versions it speaks; spekterm says plainly when its version and
   the server's do not meet, instead of failing silently.
-- **No outbound connections** from the server in v1. It accepts connections and makes none.
+- **No outbound connections** from the server. It accepts connections and makes none; both legs of a relay
+  tunnel connect to it.
+- **Relaying is off until the operator turns it on**, because it is a different load from handoffs and carries
+  members' own traffic (§2.4). Its limits (tunnels in total and per desktop, throughput per tunnel) are settings
+  with defaults measured on a small ARM machine. The log shows each tunnel's duration and byte counts, never
+  its content.
 
 ## 10. What changes in spekterm
 
@@ -308,6 +388,28 @@ here so the boundary is clear.
 A paired phone needs no change to see these items: they are ordinary inbox items, which remote access
 already lists.
 
+For the relay (§8.5), in spekterm:
+
+- **Settings → Team**: "Reach this desktop from the phone through the team server", off by default, shown only
+  when the server offers relaying and remote access is on.
+- **Grants**: one per paired phone, asked for when the setting is turned on or a phone is paired, given to the
+  phone over its authenticated remote connection, revoked when the phone is unpaired, the setting is turned off
+  or the device leaves the team.
+- **Tunnels**: on the server's request, open a tunnel to the same server with the team connection's certificate
+  check, for a grant the desktop holds, and hand its byte stream to the remote-access listener as one more
+  incoming connection. The listener's rules (credential checks, failure throttling, connection limits) apply as
+  on a LAN, with throttling keyed by grant instead of address.
+- **spekterm's own PRD and documentation**: its remote access no longer says "no relay"; the network-surface
+  test and the website's "Data and network" page say that, with the setting on, the desktop opens a tunnel to
+  the team server when one of its phones asks.
+
+In spekterm-android:
+
+- **Two paths**: with a grant from its desktop, the phone tries the relay alongside the desktop's own addresses,
+  later than them, and shows which path it is on.
+- **Two certificate checks**: the server's (pinned when the team's invite pinned it, otherwise the system's
+  trust store) for the outer connection, and the desktop's pin, unchanged, for the TLS inside the tunnel.
+
 ## 11. Milestones
 
 | | Delivers |
@@ -316,6 +418,7 @@ already lists.
 | **M1** | Send and receive: a handoff confirmed on one desktop arrives in another desktop's inbox, now or on the next connection. |
 | **M2** | The way back: `taken`, `declined`, `done` with the report; the sender's list and notification. |
 | **M3** | Directory and presence. |
+| **M4** | The phone relay (§8.5): grants, tunnels and limits on the server; the desktop and the phone in their own repositories. |
 
 M1 alone already addresses "it was not seen". M2 is what addresses "the sender cannot tell".
 
@@ -329,6 +432,8 @@ M1 alone already addresses "it was not seen". M2 is what addresses "the sender c
 | **The agent introduction outgrows its budget.** | Teammates are not listed in the introduction; it points to a teammates file, so its size does not grow with the team. |
 | **Version skew** between desktops and the server. | Versioned protocol, explicit "incompatible" state in spekterm. |
 | **The handoff body reveals more than the sender meant.** | The sender confirms the full text before it is sent (§7.3). |
+| **Relayed streams overload a small server** and slow handoffs for the team. | Off until the operator turns it on; tunnels and throughput capped, with defaults measured on a two-core ARM NAS; handoffs stay on their own connections. |
+| **The relay widens the desktop's exposure.** | Blind relay, desktop's certificate pinned inside the tunnel, the desktop's own authentication unchanged, off until the member turns it on (§7.7). |
 
 ## 13. Open questions
 
@@ -369,3 +474,6 @@ None at present.
   sending device keeps its own copy. Keeping titles would make them the one piece of text the server holds for
   90 days (handoff-return, design D9).
 - **Repository**: `spekhq/spekterm-server` on GitHub, public (2026-11-04; was open question 2).
+- **The phone relay is in scope, as a second path** (2026-11-06; was a v1 non-goal). Direct access stays the
+  default; for a member of a team whose operator allows it, the relay is an optional second path to their own
+  desktop (§2.4, §8.5). It does not replace direct access and does not add push.
